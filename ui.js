@@ -241,3 +241,175 @@ export function printSummary(failed) {
     console.log(`  ${c.green('✓ All tests passed')}\n`);
   }
 }
+
+// ============================================================================
+// Coverage UI Functions
+// ============================================================================
+
+/**
+ * Format coverage percentage with color
+ * @param {string} pct - Percentage string or '-'
+ * @returns {string} - Colored percentage string
+ */
+export function formatCoveragePct(pct) {
+  if (pct === '-' || pct === null || pct === undefined) {
+    return c.dim('     -');
+  }
+  const num = parseFloat(pct);
+  const color = num >= 80 ? c.green : num >= 60 ? c.yellow : c.red;
+  return color(`${pct.padStart(5)}%`);
+}
+
+/**
+ * Create initial coverage state for a package
+ */
+export function createInitialCoverageState() {
+  return {
+    lines: null,
+    branches: null,
+    functions: null,
+    status: 'pending', // pending, loading, done
+  };
+}
+
+/**
+ * Render coverage table header
+ * @param {number} nameWidth - Width for package name column
+ */
+export function renderCoverageHeader(nameWidth) {
+  return c.dim(`  ${'Package'.padEnd(nameWidth)}${'Lines'.padStart(7)}${'Branch'.padStart(8)}${'Funcs'.padStart(8)}`);
+}
+
+/**
+ * Render a single coverage row
+ * @param {string} pkgName - Package name
+ * @param {object} coverageState - Coverage state object
+ * @param {number} nameWidth - Width for package name column
+ */
+export function renderCoverageRow(pkgName, coverageState, nameWidth) {
+  const name = `  ${c.blue(pkgName.padEnd(nameWidth))}`;
+  
+  if (!coverageState || coverageState.status === 'pending') {
+    return c.dim(`  ${pkgName.padEnd(nameWidth)}${'-'.padStart(7)}${'-'.padStart(8)}${'-'.padStart(8)}`);
+  }
+  
+  if (coverageState.status === 'loading') {
+    return `${name}${c.dim('...'.padStart(7))}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}`;
+  }
+  
+  const linesStr = formatCoveragePct(coverageState.lines);
+  const branchStr = formatCoveragePct(coverageState.branches);
+  const funcsStr = formatCoveragePct(coverageState.functions);
+  
+  return `${name}${linesStr}${branchStr}${funcsStr}`;
+}
+
+/**
+ * Render coverage totals row
+ * @param {object} coverageStates - Map of package name to coverage state
+ * @param {number} nameWidth - Width for package name column
+ */
+export function renderCoverageTotals(coverageStates, nameWidth) {
+  const totals = {
+    linesHit: 0, linesTotal: 0,
+    branchesHit: 0, branchesTotal: 0,
+    functionsHit: 0, functionsTotal: 0,
+  };
+  
+  let hasAny = false;
+  
+  for (const state of Object.values(coverageStates)) {
+    if (!state || state.status !== 'done') continue;
+    hasAny = true;
+    
+    // We need raw values to calculate totals properly
+    // For now, we'll show weighted average based on available percentages
+    if (state.lines && state.lines !== '-') {
+      totals.linesHit += parseFloat(state.lines);
+      totals.linesTotal += 1;
+    }
+    if (state.branches && state.branches !== '-') {
+      totals.branchesHit += parseFloat(state.branches);
+      totals.branchesTotal += 1;
+    }
+    if (state.functions && state.functions !== '-') {
+      totals.functionsHit += parseFloat(state.functions);
+      totals.functionsTotal += 1;
+    }
+  }
+  
+  const avgLines = totals.linesTotal ? (totals.linesHit / totals.linesTotal).toFixed(1) : '-';
+  const avgBranches = totals.branchesTotal ? (totals.branchesHit / totals.branchesTotal).toFixed(1) : '-';
+  const avgFunctions = totals.functionsTotal ? (totals.functionsHit / totals.functionsTotal).toFixed(1) : '-';
+  
+  const linesStr = hasAny ? formatCoveragePct(avgLines) : c.dim('-'.padStart(7));
+  const branchStr = hasAny ? formatCoveragePct(avgBranches) : c.dim('-'.padStart(8));
+  const funcsStr = hasAny ? formatCoveragePct(avgFunctions) : c.dim('-'.padStart(8));
+  
+  return `  ${c.bold('Total'.padEnd(nameWidth))}${linesStr}${branchStr}${funcsStr}`;
+}
+
+/**
+ * Print coverage table (for non-interactive mode)
+ * @param {Array} packages - Package list
+ * @param {object} coverageStates - Map of package name to coverage state
+ * @param {number} nameWidth - Width for package name column
+ */
+export function printCoverageTable(packages, coverageStates, nameWidth) {
+  const lineWidth = nameWidth + 2 + 7 + 8 + 8;
+  
+  console.log(`\n${c.bold(c.cyan('Coverage Summary'))}\n`);
+  console.log(renderCoverageHeader(nameWidth));
+  console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
+  
+  for (const pkg of packages) {
+    console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
+  }
+  
+  console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
+  console.log(renderCoverageTotals(coverageStates, nameWidth));
+}
+
+/**
+ * Print verbose coverage (per-file details)
+ * @param {object} verboseData - Data from getVerboseCoverageData
+ */
+export function printVerboseCoverage(verboseData) {
+  const { packageDisplayData, fileWidth } = verboseData;
+  
+  console.log(`\n${c.bold(c.cyan('Coverage Details'))}\n`);
+  
+  for (const { name, relevantFiles, displayPaths, stats } of packageDisplayData) {
+    const linesStr = formatCoveragePct(stats.lines);
+    const branchStr = formatCoveragePct(stats.branches);
+    const funcsStr = formatCoveragePct(stats.functions);
+    
+    console.log(`${c.bold(name.padEnd(fileWidth + 2))}  ${linesStr}  ${branchStr}  ${funcsStr}`);
+    console.log(c.dim('─'.repeat(fileWidth + 28)));
+    
+    for (let i = 0; i < relevantFiles.length; i++) {
+      const f = relevantFiles[i];
+      const relPath = displayPaths[i];
+      const fLines = f.linesTotal ? ((f.linesHit / f.linesTotal) * 100).toFixed(1) : '-';
+      const fBranches = f.branchesTotal ? ((f.branchesHit / f.branchesTotal) * 100).toFixed(1) : '-';
+      const fFunctions = f.functionsTotal ? ((f.functionsHit / f.functionsTotal) * 100).toFixed(1) : '-';
+      
+      console.log(
+        `  ${c.dim(relPath.padEnd(fileWidth))}  ${formatCoveragePct(fLines)}  ${formatCoveragePct(fBranches)}  ${formatCoveragePct(fFunctions)}`
+      );
+    }
+    console.log();
+  }
+}
+
+/**
+ * Print merged coverage file info
+ * @param {object} mergedInfo - Object with path and sizeKb
+ */
+export function printMergedCoverageInfo(mergedInfo) {
+  if (mergedInfo) {
+    console.log(`${c.green('✓')} Merged: coverage/lcov.info (${mergedInfo.sizeKb} KB)\n`);
+  } else {
+    console.log(`${c.red('✗')} Failed to merge coverage files\n`);
+  }
+}
