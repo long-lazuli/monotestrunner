@@ -1,0 +1,19 @@
+{
+  "name": "monotestrunner",
+  "version": "0.1.0",
+  "description": "A parallel test runner for monorepos with an interactive terminal UI. Runs tests across multiple packages simultaneously and displays real-time results in a beautiful summary table.",
+  "author": "Long-lazuli",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/long-lazuli/monotestrunner.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/long-lazuli/monotestrunner/issues"
+  },
+  "homepage": "https://github.com/long-lazuli/monotestrunner#readme"
+}
