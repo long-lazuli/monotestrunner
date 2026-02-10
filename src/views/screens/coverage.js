@@ -44,13 +44,13 @@ export function buildCoverageRows(pkg, rootDir) {
 
   // Header
   rows.push({
-    text: c.dim(`  ${'File'.padEnd(fileWidth)}  ${'Lines'.padStart(8)}  ${'Branch'.padStart(8)}  ${'Funcs'.padStart(8)}`),
+    text: c.dim(`    ${'File'.padEnd(fileWidth)}  ${'Lines'.padStart(8)}  ${'Branch'.padStart(8)}  ${'Funcs'.padStart(8)}`),
     type: 'header',
   });
 
   // Separator
   rows.push({
-    text: c.dim(`  ${'─'.repeat(fileWidth + 30)}`),
+    text: c.dim(`    ${'─'.repeat(fileWidth + 30)}`),
     type: 'separator',
   });
 
@@ -67,15 +67,16 @@ export function buildCoverageRows(pkg, rootDir) {
     const ff = formatCoveragePct(fFunctions, 8, th.functions);
 
     rows.push({
-      text: `  ${c.dim(relPath.padEnd(fileWidth))}  ${fl.text}  ${fb.text}  ${ff.text}`,
+      text: `    ${c.dim(relPath.padEnd(fileWidth))}  ${fl.text}  ${fb.text}  ${ff.text}`,
       type: 'file',
       fileIndex: i,
+      absFile: f.file,
     });
   }
 
   // Separator
   rows.push({
-    text: c.dim(`  ${'─'.repeat(fileWidth + 30)}`),
+    text: c.dim(`    ${'─'.repeat(fileWidth + 30)}`),
     type: 'separator',
   });
 
@@ -85,7 +86,7 @@ export function buildCoverageRows(pkg, rootDir) {
   const tb = formatCoveragePct(stats.branches, 8, th.branches);
   const tf = formatCoveragePct(stats.functions, 8, th.functions);
   rows.push({
-    text: `  ${c.bold('Total'.padEnd(fileWidth))}  ${tl.text}  ${tb.text}  ${tf.text}`,
+    text: `    ${c.bold('Total'.padEnd(fileWidth))}  ${tl.text}  ${tb.text}  ${tf.text}`,
     type: 'total',
   });
 
@@ -157,7 +158,7 @@ export function renderCoverageScreen({ pkg, state, coverageState, cursorDimmed, 
   }
 
   // Footer
-  const footerParts = ['←:tests', '↑↓:select', 'r:rerun', 'c:coverage', 'q:quit'];
+  const footerParts = ['←:tests', '↑↓:select', 'Enter:open', 'r:rerun', 'c:coverage', 'q:quit'];
   process.stdout.write(term.moveTo(rows, 1) + term.clearLine);
   process.stdout.write(` ${c.dim(footerParts.join('  '))}`);
 }
@@ -190,7 +191,7 @@ function renderCoverageList(covRows, selectableIndices, coverageState, cursorDim
 
       if (isSelected) {
         const marker = cursorDimmed ? c.gray('▶') : '▶';
-        const text = row.text.replace(/^ {2}/, marker + ' ');
+        const text = row.text.replace(/^ {4}/, '  ' + marker + ' ');
         console.log(truncate(text, cols));
       } else {
         console.log(truncate(row.text, cols));

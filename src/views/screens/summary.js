@@ -47,7 +47,7 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   console.log(`${c.bold(c.cyan('Test & Coverage Summary'))} ${c.dim(modeLabel)}\n`);
 
   // Header row
-  const headerLeft = `  ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}`;
+  const headerLeft = `    ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}`;
   const headerCov = `${'Lines'.padStart(COV_COL_WIDTH)}${'Branch'.padStart(COV_COL_WIDTH)}${'Funcs'.padStart(COV_COL_WIDTH)}`;
   const headerDur = `${'Duration'.padStart(DUR_SECTION_WIDTH)}`;
   console.log(c.dim(`${headerLeft} │ ${headerCov} │ ${headerDur}`));
@@ -56,7 +56,7 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   const leftWidth = nameWidth + 31;
   const covWidth = COV_SECTION_WIDTH + 2;
   const durWidth = DUR_SECTION_WIDTH + 1;
-  console.log(c.dim(`  ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`));
+  console.log(c.dim(`    ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`));
 
   // Package rows
   for (let i = 0; i < packages.length; i++) {
@@ -70,7 +70,7 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   }
 
   // Separator
-  console.log(c.dim(`  ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`));
+  console.log(c.dim(`    ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`));
 
   // Totals
   process.stdout.write(term.clearLine);
@@ -79,9 +79,9 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   // Status lines
   console.log();
   process.stdout.write(term.clearLine);
-  console.log(c.dim(`  ${statusMessage || ' '}`));
+  console.log(c.dim(`    ${statusMessage || ' '}`));
   process.stdout.write(term.clearLine);
-  console.log(c.dim('  ↑↓:navigate  →:open  r:rerun  R:rerun all  c:coverage  C:all coverage  w:watch  ?:help  q:quit'));
+  console.log(c.dim('    ↑↓:navigate  →:open  r:rerun  R:rerun all  c:coverage  C:all coverage  w:watch  ?:help  q:quit'));
 }
 
 /**
@@ -90,7 +90,7 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
 function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDimmed, covEnabled) {
   const paddedName = pkg.name.padEnd(nameWidth - pkg.runner.length - 3);
   const runnerSuffix = c.gray(`(${pkg.runner})`);
-  const marker = selected ? (cursorDimmed ? c.gray('▶') : '▶') : ' ';
+  const marker = selected ? `  ${cursorDimmed ? c.gray('▶') : '▶'}` : '   ';
   const styledName = selected && !cursorDimmed ? paddedName : c.blue(paddedName);
   const name = `${marker} ${styledName} ${runnerSuffix}`;
   const sep = c.dim('│');
@@ -200,7 +200,7 @@ function renderSummaryTotals(states, coverageFlags, nameWidth) {
   const filesStr = hasAnyDone ? formatNum(totals.files) : formatNum(null);
   const testsStr = hasAnyDone ? formatNum(totals.tests) : formatNum(null);
   const { passStr, skipStr, failStr } = formatColoredColumns(totals.passed, totals.skipped, totals.failed, true);
-  const left = `  ${c.bold('Total'.padEnd(nameWidth))}${filesStr}${testsStr}${passStr}${skipStr}${failStr}`;
+  const left = `    ${c.bold('Total'.padEnd(nameWidth))}${filesStr}${testsStr}${passStr}${skipStr}${failStr}`;
 
   let covText;
   if (covTotals.linesCount > 0 || covTotals.branchesCount > 0 || covTotals.functionsCount > 0) {

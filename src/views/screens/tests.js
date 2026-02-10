@@ -59,7 +59,7 @@ export function buildTestRows(testResults) {
       }
 
       rows.push({
-        text: `  ${icon} ${nameText}  ${c.dim(durationStr)}`,
+        text: `    ${icon} ${nameText}  ${c.dim(durationStr)}`,
         type: 'test',
         test,
         file: suite.file,
@@ -172,8 +172,8 @@ function renderFullList(testRows, selectableIndices, testsState, cursorDimmed, c
 
       if (isSelected) {
         const marker = cursorDimmed ? c.gray('▶') : '▶';
-        // Replace 2-space indent with marker + space
-        const text = row.text.replace(/^ {2}/, marker + ' ');
+        // Replace inner 2 spaces of 4-space indent with marker + space
+        const text = row.text.replace(/^ {4}/, '  ' + marker + ' ');
         console.log(truncate(text, cols));
       } else {
         console.log(truncate(row.text, cols));
@@ -235,7 +235,7 @@ function renderSplitView(testRows, selectableIndices, testsState, cursorDimmed, 
   // Divider line: blank if all rows visible, "  ..." if some hidden below
   const hasHiddenRows = testsState.scrollOffset + topRows < testRows.length;
   process.stdout.write(term.clearLine);
-  console.log(hasHiddenRows ? c.dim('  ...') : '');
+  console.log(hasHiddenRows ? c.dim('    ...') : '');
 
   // Render popover box
   renderPopover({

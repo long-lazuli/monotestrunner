@@ -17,7 +17,7 @@ import { join, basename, relative } from 'node:path';
 import { term, spinner, createInitialState } from '../ui.js';
 import { getPackageCoverage } from '../coverage.js';
 import { createWatcherManager } from '../watcher.js';
-import { parseVitestFinal, parseBunFinal, countVitestDots, countBunDots, parseJunitFile } from '../parsers.js';
+import { parseVitestFinal, parseBunFinal, countVitestDots, countBunDots, parseJunitFile, extractFailureLine } from '../parsers.js';
 
 import { classifyKey } from './input.js';
 import {
@@ -491,40 +491,107 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     }
   };
 
-  // ── Enter action (popover) ──
+  // ── Enter action ──
 
-  const executeEnterAction = () => {
-    const actionCommand = config.enterAction?.command;
-    if (!actionCommand) return; // No action configured — do nothing
+  /**
+   * Resolve a command template with placeholders and foobar2000-style
+   * conditional sections.
+   *
+   * Placeholders: {filePath}, {line}, etc. — replaced with values from the map.
+   * Conditional sections: [...] — included only if every {placeholder} inside
+   * resolved to a non-empty value. Sections can't nest.
+   *
+   * @param {string} template - Command template string
+   * @param {Record<string, string>} values - Placeholder → value map
+   * @returns {string} Resolved command
+   */
+  const resolveCommand = (template, values) => {
+    // 1. Process conditional sections: [literal{placeholder}literal...]
+    //    Drop the section if any placeholder inside resolved to ''
+    const withSections = template.replace(/\[([^\]]*)\]/g, (_match, inner) => {
+      let allPresent = true;
+      const resolved = inner.replace(/\{(\w+)\}/g, (_m, key) => {
+        const val = values[key] ?? '';
+        if (!val) allPresent = false;
+        return val;
+      });
+      return allPresent ? resolved : '';
+    });
 
-    const pkg = getSelectedPkg();
-    const testRows = buildTestRows(states[pkg.name].testResults);
-    const row = testRows[viewState.tests.selectedIndex];
-    if (!row || row.type !== 'test') return;
+    // 2. Replace remaining top-level placeholders
+    return withSections.replace(/\{(\w+)\}/g, (_m, key) => values[key] ?? '');
+  };
 
-    // Build placeholder values
-    const pkgFilePath = row.file || '';
-    const absFilePath = pkgFilePath ? join(pkg.path, pkgFilePath) : '';
-    const filePath = absFilePath ? relative(rootDir, absFilePath) : '';
-    const fileName = pkgFilePath ? basename(pkgFilePath) : '';
-
-    const resolved = actionCommand
-      .replace(/\{filePath\}/g, filePath)
-      .replace(/\{pkgFilePath\}/g, pkgFilePath)
-      .replace(/\{absFilePath\}/g, absFilePath)
-      .replace(/\{fileName\}/g, fileName)
-      .replace(/\{line\}/g, '1')
-      .replace(/\{testName\}/g, row.test.name)
-      .replace(/\{packagePath\}/g, pkg.path)
-      .replace(/\{packageName\}/g, pkg.name);
-
-    // Fire-and-forget: spawn detached, ignore stdio
+  /**
+   * Fire-and-forget spawn of a resolved command string.
+   */
+  const spawnAction = (resolved) => {
     try {
       const child = spawn(resolved, { shell: true, detached: true, stdio: 'ignore' });
       child.unref();
     } catch {
       // Silently ignore spawn errors — don't crash interactive mode
     }
+  };
+
+  const executeEnterAction = () => {
+    const actionCommand = config.enterAction?.command;
+    if (!actionCommand) return;
+
+    const pkg = getSelectedPkg();
+    const testRows = buildTestRows(states[pkg.name].testResults);
+    const row = testRows[viewState.tests.selectedIndex];
+    if (!row || row.type !== 'test') return;
+
+    const pkgFilePath = row.file || '';
+    const absFilePath = pkgFilePath ? join(pkg.path, pkgFilePath) : '';
+    const filePath = absFilePath ? relative(rootDir, absFilePath) : '';
+    const fileName = pkgFilePath ? basename(pkgFilePath) : '';
+
+    const line = row.test.status === 'failed'
+      ? extractFailureLine(row.test.failureMessage, row.file)
+      : '';
+
+    spawnAction(resolveCommand(actionCommand, {
+      filePath,
+      pkgFilePath,
+      absFilePath,
+      fileName,
+      line,
+      testName: row.test.name,
+      packagePath: pkg.path,
+      packageName: pkg.name,
+    }));
+  };
+
+  const executeCoverageEnterAction = () => {
+    const actionCommand = config.enterAction?.command;
+    if (!actionCommand) return;
+
+    const pkg = getSelectedPkg();
+    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const selectableIndices = getSelectableFileIndices(covRows);
+    const cursorRow = viewState.coverage.selectedIndex;
+    if (!selectableIndices.includes(cursorRow)) return;
+
+    const row = covRows[cursorRow];
+    if (!row || row.type !== 'file') return;
+
+    const absFilePath = row.absFile || '';
+    const filePath = absFilePath ? relative(rootDir, absFilePath) : '';
+    const fileName = absFilePath ? basename(absFilePath) : '';
+    const pkgFilePath = absFilePath ? relative(pkg.path, absFilePath) : '';
+
+    spawnAction(resolveCommand(actionCommand, {
+      filePath,
+      pkgFilePath,
+      absFilePath,
+      fileName,
+      line: '',
+      testName: '',
+      packagePath: pkg.path,
+      packageName: pkg.name,
+    }));
   };
 
   // ── Single keypress handler ──
@@ -662,8 +729,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
           viewState.tests.popoverScrollOffset = 0;
           render();
         }
+      } else if (viewState.currentScreen === 'coverage') {
+        executeCoverageEnterAction();
       }
-      // Enter does nothing on coverage
       return;
     }
 

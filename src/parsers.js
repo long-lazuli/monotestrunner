@@ -411,3 +411,21 @@ function addTestToSuites(suites, fileName, test) {
   }
   suite.tests.push(test);
 }
+
+/**
+ * Extract the first failure line number from a failure message stack trace.
+ * Matches vitest (❯ file:line:col) and bun (at file:line:col) patterns.
+ * Only returns a line from a stack frame whose path ends with the given file.
+ *
+ * @param {string} failureMessage - Raw failure message with stack trace
+ * @param {string} file - Test file path to match against (e.g. "test/errors.test.ts")
+ * @returns {string} Line number as string, or '' if not found
+ */
+export function extractFailureLine(failureMessage, file) {
+  if (!failureMessage || !file) return '';
+  for (const line of failureMessage.split('\n')) {
+    const m = line.match(/(?:❯|at)\s+(.+?):(\d+):\d+/);
+    if (m && m[1].endsWith(file)) return m[2];
+  }
+  return '';
+}
