@@ -33,7 +33,9 @@ import {
 import { renderSummary } from './screens/summary.js';
 import { renderTestsScreen, buildTestRows, getSelectableIndices } from './screens/tests.js';
 import { renderCoverageScreen, buildCoverageRows, getSelectableFileIndices } from './screens/coverage.js';
+import { buildCoveragePopoverContent } from './screens/popover.js';
 import { renderHelp } from './help.js';
+import { resolveCommand } from './command.js';
 
 // Alternate screen buffer
 const ALT_SCREEN_ON = '\x1b[?1049h';
@@ -350,6 +352,11 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   const navigateBack = () => {
     if (viewState.currentScreen === 'coverage') {
+      if (viewState.coverage.popoverVisible) {
+        viewState.coverage.popoverVisible = false;
+        viewState.coverage.popoverScrollOffset = 0;
+        viewState.coverage.popoverCursorIndex = -1;
+      }
       viewState.currentScreen = 'tests';
       render();
     } else if (viewState.currentScreen === 'tests') {
@@ -375,10 +382,15 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     const newIdx = viewState.summary.selectedIndex + direction;
     if (newIdx < 0 || newIdx >= packages.length) return;
     viewState.summary.selectedIndex = newIdx;
-    // Close popover if open
+    // Close popovers if open
     if (viewState.tests.popoverVisible) {
       viewState.tests.popoverVisible = false;
       viewState.tests.popoverScrollOffset = 0;
+    }
+    if (viewState.coverage.popoverVisible) {
+      viewState.coverage.popoverVisible = false;
+      viewState.coverage.popoverScrollOffset = 0;
+      viewState.coverage.popoverCursorIndex = -1;
     }
     enterDetailScreen();
     // Also reset coverage cursor for the new package
@@ -494,35 +506,6 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
   // ── Enter action ──
 
   /**
-   * Resolve a command template with placeholders and foobar2000-style
-   * conditional sections.
-   *
-   * Placeholders: {filePath}, {line}, etc. — replaced with values from the map.
-   * Conditional sections: [...] — included only if every {placeholder} inside
-   * resolved to a non-empty value. Sections can't nest.
-   *
-   * @param {string} template - Command template string
-   * @param {Record<string, string>} values - Placeholder → value map
-   * @returns {string} Resolved command
-   */
-  const resolveCommand = (template, values) => {
-    // 1. Process conditional sections: [literal{placeholder}literal...]
-    //    Drop the section if any placeholder inside resolved to ''
-    const withSections = template.replace(/\[([^\]]*)\]/g, (_match, inner) => {
-      let allPresent = true;
-      const resolved = inner.replace(/\{(\w+)\}/g, (_m, key) => {
-        const val = values[key] ?? '';
-        if (!val) allPresent = false;
-        return val;
-      });
-      return allPresent ? resolved : '';
-    });
-
-    // 2. Replace remaining top-level placeholders
-    return withSections.replace(/\{(\w+)\}/g, (_m, key) => values[key] ?? '');
-  };
-
-  /**
    * Fire-and-forget spawn of a resolved command string.
    */
   const spawnAction = (resolved) => {
@@ -594,6 +577,102 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     }));
   };
 
+  /**
+   * Get the selectableBodyIndices for the current coverage popover.
+   * Helper used by both cursor movement and enter action.
+   */
+  const getCoveragePopoverSelectable = () => {
+    const pkg = getSelectedPkg();
+    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const cursorRow = viewState.coverage.selectedIndex;
+    const row = covRows[cursorRow];
+    if (!row || row.type !== 'file') return { row: null, selectableBodyIndices: [] };
+
+    const cols = process.stdout.columns || 80;
+    const boxInnerWidth = cols - 4;
+    const content = buildCoveragePopoverContent({
+      absFile: row.absFile,
+      displayPath: row.displayPath,
+      lineHits: row.lineHits,
+      branchHits: row.branchHits,
+      fileStats: row.fileStats,
+      innerWidth: boxInnerWidth,
+    });
+    return { row, selectableBodyIndices: content.selectableBodyIndices, content };
+  };
+
+  /**
+   * Move the coverage popover cursor between selectable (uncovered/partial) lines.
+   */
+  const moveCoveragePopoverCursor = (direction) => {
+    const { selectableBodyIndices } = getCoveragePopoverSelectable();
+    if (selectableBodyIndices.length === 0) return;
+
+    const ci = viewState.coverage.popoverCursorIndex;
+    if (ci === -1) {
+      // First movement — land on first or last selectable
+      viewState.coverage.popoverCursorIndex = direction > 0 ? 0 : selectableBodyIndices.length - 1;
+    } else {
+      const newIdx = ci + direction;
+      if (newIdx >= 0 && newIdx < selectableBodyIndices.length) {
+        viewState.coverage.popoverCursorIndex = newIdx;
+      }
+    }
+
+    // Auto-scroll to keep cursor visible: set popoverScrollOffset so the
+    // body row at selectableBodyIndices[cursorIndex] is within the visible window.
+    const bodyIdx = selectableBodyIndices[viewState.coverage.popoverCursorIndex];
+    if (bodyIdx !== undefined) {
+      // Estimate visible body rows (rough: half of terminal minus header/borders)
+      const rows = process.stdout.rows || 24;
+      const contentRows = rows - 5 - 1; // HEADER_LINES + FOOTER_LINES
+      const maxBodyRows = Math.max(1, Math.floor(contentRows / 2) - 5); // approx
+      if (bodyIdx < viewState.coverage.popoverScrollOffset) {
+        viewState.coverage.popoverScrollOffset = bodyIdx;
+      } else if (bodyIdx >= viewState.coverage.popoverScrollOffset + maxBodyRows) {
+        viewState.coverage.popoverScrollOffset = bodyIdx - maxBodyRows + 1;
+      }
+    }
+  };
+
+  /**
+   * Execute enter action from within coverage popover — opens editor at selected line.
+   */
+  const executeCoveragePopoverEnterAction = () => {
+    const actionCommand = config.enterAction?.command;
+    if (!actionCommand) return;
+
+    const { row, selectableBodyIndices } = getCoveragePopoverSelectable();
+    if (!row) return;
+
+    const pkg = getSelectedPkg();
+    const absFilePath = row.absFile || '';
+    const filePath = absFilePath ? relative(rootDir, absFilePath) : '';
+    const fileName = absFilePath ? basename(absFilePath) : '';
+    const pkgFilePath = absFilePath ? relative(pkg.path, absFilePath) : '';
+
+    // Determine the line number from the popover cursor
+    let line = '';
+    const ci = viewState.coverage.popoverCursorIndex;
+    if (ci >= 0 && ci < selectableBodyIndices.length) {
+      // selectableBodyIndices[ci] is the body array index.
+      // Body lines are 0-indexed corresponding to source lines (body[0] = source line 1).
+      const bodyIdx = selectableBodyIndices[ci];
+      line = String(bodyIdx + 1); // convert to 1-based line number
+    }
+
+    spawnAction(resolveCommand(actionCommand, {
+      filePath,
+      pkgFilePath,
+      absFilePath,
+      fileName,
+      line,
+      testName: '',
+      packagePath: pkg.path,
+      packageName: pkg.name,
+    }));
+  };
+
   // ── Single keypress handler ──
 
   const handleKeypress = (str, key) => {
@@ -645,14 +724,63 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
         return;
       }
 
-      // Horizontal navigation: ← closes popover and goes back, → keeps popover and goes to coverage
+      // Horizontal navigation: ← closes popover, → goes to coverage
       if (evt.type === 'horizontal') {
         if (evt.direction === -1) {
           viewState.tests.popoverVisible = false;
           viewState.tests.popoverScrollOffset = 0;
-          navigateBack();
+          render();
         } else {
           navigateForward(); // popover stays open when going to coverage
+        }
+        return;
+      }
+
+      // Actions work with popover open
+      if (evt.type === 'action') {
+        handleAction(evt.action);
+        return;
+      }
+
+      return;
+    }
+
+    // 2b. Popover visible (coverage screen)
+    if (viewState.currentScreen === 'coverage' && viewState.coverage.popoverVisible) {
+      if (evt.type === 'escape') {
+        viewState.coverage.popoverVisible = false;
+        viewState.coverage.popoverScrollOffset = 0;
+        viewState.coverage.popoverCursorIndex = -1;
+        render();
+        return;
+      }
+
+      if (evt.type === 'enter') {
+        // Open editor at the selected uncovered/partial line
+        executeCoveragePopoverEnterAction();
+        return;
+      }
+
+      if (evt.type === 'vertical') {
+        // Move cursor between selectable body lines (uncovered/partial)
+        moveCoveragePopoverCursor(evt.direction);
+        render();
+        return;
+      }
+
+      // PgUp/PgDn switches package
+      if (evt.type === 'vertical-page') {
+        switchPackage(evt.direction);
+        return;
+      }
+
+      // Horizontal: ← closes popover, → does nothing (already rightmost screen)
+      if (evt.type === 'horizontal') {
+        if (evt.direction === -1) {
+          viewState.coverage.popoverVisible = false;
+          viewState.coverage.popoverScrollOffset = 0;
+          viewState.coverage.popoverCursorIndex = -1;
+          render();
         }
         return;
       }
@@ -730,7 +858,16 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
           render();
         }
       } else if (viewState.currentScreen === 'coverage') {
-        executeCoverageEnterAction();
+        // Open coverage popover for selected file
+        const pkg = packages[viewState.summary.selectedIndex];
+        const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+        const selectable = getSelectableFileIndices(covRows);
+        if (selectable.includes(viewState.coverage.selectedIndex)) {
+          viewState.coverage.popoverVisible = true;
+          viewState.coverage.popoverScrollOffset = 0;
+          viewState.coverage.popoverCursorIndex = -1;
+          render();
+        }
       }
       return;
     }

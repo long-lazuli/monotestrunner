@@ -31,15 +31,28 @@ export function parseLcovDetailed(lcovPath) {
         linesHit: 0, linesTotal: 0,
         branchesHit: 0, branchesTotal: 0,
         functionsHit: 0, functionsTotal: 0,
+        lineHits: new Map(),    // lineNum → executionCount
+        branchHits: new Map(),  // lineNum → { total, taken }
       };
     } else if (current) {
-      if (line.startsWith('LH:')) current.linesHit = parseInt(line.slice(3), 10);
-      if (line.startsWith('LF:')) current.linesTotal = parseInt(line.slice(3), 10);
-      if (line.startsWith('BRH:')) current.branchesHit = parseInt(line.slice(4), 10);
-      if (line.startsWith('BRF:')) current.branchesTotal = parseInt(line.slice(4), 10);
-      if (line.startsWith('FNH:')) current.functionsHit = parseInt(line.slice(4), 10);
-      if (line.startsWith('FNF:')) current.functionsTotal = parseInt(line.slice(4), 10);
-      if (line === 'end_of_record') {
+      if (line.startsWith('DA:')) {
+        const parts = line.slice(3).split(',');
+        current.lineHits.set(parseInt(parts[0], 10), parseInt(parts[1], 10));
+      } else if (line.startsWith('BRDA:')) {
+        const parts = line.slice(5).split(',');
+        const lineNum = parseInt(parts[0], 10);
+        const taken = parts[3] === '-' ? 0 : parseInt(parts[3], 10);
+        const existing = current.branchHits.get(lineNum) || { total: 0, taken: 0 };
+        existing.total++;
+        if (taken > 0) existing.taken++;
+        current.branchHits.set(lineNum, existing);
+      } else if (line.startsWith('LH:')) current.linesHit = parseInt(line.slice(3), 10);
+      else if (line.startsWith('LF:')) current.linesTotal = parseInt(line.slice(3), 10);
+      else if (line.startsWith('BRH:')) current.branchesHit = parseInt(line.slice(4), 10);
+      else if (line.startsWith('BRF:')) current.branchesTotal = parseInt(line.slice(4), 10);
+      else if (line.startsWith('FNH:')) current.functionsHit = parseInt(line.slice(4), 10);
+      else if (line.startsWith('FNF:')) current.functionsTotal = parseInt(line.slice(4), 10);
+      else if (line === 'end_of_record') {
         files.push(current);
         current = null;
       }
@@ -337,4 +350,25 @@ export function getVerboseCoverageData(rootDir, packages) {
   const fileWidth = Math.max(40, ...allDisplayPaths.map(p => p.length));
 
   return { packageDisplayData, fileWidth };
+}
+
+// ============================================================================
+// Per-line coverage status
+// ============================================================================
+
+/**
+ * Get coverage status for a single source line.
+ *
+ * @param {number} lineNum - 1-based line number
+ * @param {Map<number, number>} lineHits - DA: data (lineNum → executionCount)
+ * @param {Map<number, {total: number, taken: number}>} branchHits - BRDA: data
+ * @returns {'covered'|'partial'|'uncovered'|null} - null = not instrumented
+ */
+export function getLineCoverageStatus(lineNum, lineHits, branchHits) {
+  if (!lineHits.has(lineNum)) return null;
+  const hits = lineHits.get(lineNum);
+  if (hits === 0) return 'uncovered';
+  const branch = branchHits.get(lineNum);
+  if (branch && branch.taken < branch.total) return 'partial';
+  return 'covered';
 }

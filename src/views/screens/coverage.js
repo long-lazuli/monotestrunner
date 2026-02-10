@@ -15,7 +15,8 @@ import {
   getDisplayPath,
 } from '../../coverage.js';
 import { renderDetailHeader, HEADER_LINES, FOOTER_LINES } from './header.js';
-import { join } from 'node:path';
+import { buildCoveragePopoverContent, renderPopover, getPopoverBoxHeight } from './popover.js';
+import { join, isAbsolute } from 'node:path';
 
 /**
  * Build the flat list of coverage rows from lcov data.
@@ -36,7 +37,9 @@ export function buildCoverageRows(pkg, rootDir) {
 
   const pkgRoot = join(rootDir, pkg.dir, pkg.name);
   const relevantFiles = files.filter((f) => !shouldExcludeFile(f.file));
-  const displayPaths = relevantFiles.map((f) => getDisplayPath(f.file, pkgRoot));
+  // Resolve SF: paths — vitest writes relative paths, bun may write absolute
+  const absFiles = relevantFiles.map((f) => isAbsolute(f.file) ? f.file : join(pkgRoot, f.file));
+  const displayPaths = relevantFiles.map((f, i) => getDisplayPath(absFiles[i], pkgRoot));
   const fileWidth = Math.max(40, ...displayPaths.map((p) => p.length));
   const th = thresholds || {};
 
@@ -70,7 +73,15 @@ export function buildCoverageRows(pkg, rootDir) {
       text: `    ${c.dim(relPath.padEnd(fileWidth))}  ${fl.text}  ${fb.text}  ${ff.text}`,
       type: 'file',
       fileIndex: i,
-      absFile: f.file,
+      absFile: absFiles[i],
+      displayPath: relPath,
+      lineHits: f.lineHits,
+      branchHits: f.branchHits,
+      fileStats: {
+        lines: fLines,
+        branches: fBranches,
+        functions: fFunctions,
+      },
     });
   }
 
@@ -152,13 +163,17 @@ export function renderCoverageScreen({ pkg, state, coverageState, cursorDimmed, 
       // Context-aware message based on test state
       const messages = getCoverageEmptyMessage(state);
       renderCenteredMessage(contentRows, messages);
+    } else if (coverageState.popoverVisible && selectableIndices.length > 0) {
+      renderCoverageSplitView(covRows, selectableIndices, coverageState, cursorDimmed, contentRows, cols);
     } else {
       renderCoverageList(covRows, selectableIndices, coverageState, cursorDimmed, contentRows, cols);
     }
   }
 
   // Footer
-  const footerParts = ['←:tests', '↑↓:select', 'Enter:open', 'r:rerun', 'c:coverage', 'q:quit'];
+  const footerParts = coverageState.popoverVisible
+    ? ['←:tests', '↑↓:navigate', 'Esc:close', 'Enter:open', 'r:rerun', 'c:coverage', 'q:quit']
+    : ['←:tests', '↑↓:select', 'Enter:detail', 'r:rerun', 'c:coverage', 'q:quit'];
   process.stdout.write(term.moveTo(rows, 1) + term.clearLine);
   process.stdout.write(` ${c.dim(footerParts.join('  '))}`);
 }
@@ -200,6 +215,86 @@ function renderCoverageList(covRows, selectableIndices, coverageState, cursorDim
       console.log('');
     }
   }
+}
+
+/**
+ * Render split view: file list on top, coverage popover at bottom.
+ * Popover shows annotated source lines with coverage status.
+ */
+function renderCoverageSplitView(covRows, selectableIndices, coverageState, cursorDimmed, contentRows, cols) {
+  const cursorRow = coverageState.selectedIndex;
+  const selectedRow = covRows[cursorRow];
+
+  // Build popover content for the selected file
+  const boxInnerWidth = cols - 4; // 1 margin + 1 border on each side
+  let popoverContent = { header: [], body: [], selectableBodyIndices: [] };
+  if (selectedRow && selectedRow.type === 'file') {
+    popoverContent = buildCoveragePopoverContent({
+      absFile: selectedRow.absFile,
+      displayPath: selectedRow.displayPath,
+      lineHits: selectedRow.lineHits,
+      branchHits: selectedRow.branchHits,
+      fileStats: selectedRow.fileStats,
+      innerWidth: boxInnerWidth,
+    });
+  }
+
+  const hasContent = popoverContent.header.length > 0 || popoverContent.body.length > 0;
+
+  // Popover box height: header + body + 2 borders, max half the content area
+  const maxContentRowsForPopover = Math.max(1, Math.floor(contentRows / 2) - 2);
+  const boxHeight = hasContent
+    ? getPopoverBoxHeight(popoverContent, maxContentRowsForPopover)
+    : 3;
+
+  // Layout: topRows + 1 (divider) + boxHeight = contentRows
+  const topRows = Math.max(1, contentRows - 1 - boxHeight);
+
+  // Smart scroll for top portion
+  if (cursorRow < coverageState.scrollOffset) {
+    coverageState.scrollOffset = cursorRow;
+  }
+  if (cursorRow >= coverageState.scrollOffset + topRows) {
+    coverageState.scrollOffset = cursorRow - topRows + 1;
+  }
+
+  const maxScroll = Math.max(0, covRows.length - topRows);
+  coverageState.scrollOffset = Math.max(0, Math.min(coverageState.scrollOffset, maxScroll));
+
+  // Render top portion (file list) — no cursor marker when popover owns it
+  const visibleTop = covRows.slice(coverageState.scrollOffset, coverageState.scrollOffset + topRows);
+  for (let i = 0; i < topRows; i++) {
+    process.stdout.write(term.clearLine);
+    if (i < visibleTop.length) {
+      console.log(truncate(visibleTop[i].text, cols));
+    } else {
+      console.log('');
+    }
+  }
+
+  // Divider line
+  const hasHiddenRows = coverageState.scrollOffset + topRows < covRows.length;
+  process.stdout.write(term.clearLine);
+  console.log(hasHiddenRows ? c.dim('    ...') : '');
+
+  // Apply cursor marker to selected body line before rendering
+  if (coverageState.popoverCursorIndex >= 0 && popoverContent.selectableBodyIndices) {
+    const bodyIdx = popoverContent.selectableBodyIndices[coverageState.popoverCursorIndex];
+    if (bodyIdx !== undefined && bodyIdx < popoverContent.body.length) {
+      const marker = cursorDimmed ? c.gray('▶') : '▶';
+      // Replace leading space with marker
+      const line = popoverContent.body[bodyIdx];
+      popoverContent.body[bodyIdx] = marker + (line ? line.slice(1) : '');
+    }
+  }
+
+  // Render popover box
+  renderPopover({
+    content: popoverContent,
+    scrollOffset: coverageState.popoverScrollOffset,
+    boxHeight,
+    cols,
+  });
 }
 
 // ============================================================================

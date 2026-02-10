@@ -46,6 +46,15 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   process.stdout.write(term.clearLine);
   console.log(`${c.bold(c.cyan('Test & Coverage Summary'))} ${c.dim(modeLabel)}\n`);
 
+  // Section label row (coverage group header)
+  const leftWidth = nameWidth + 31;
+  const covWidth = COV_SECTION_WIDTH + 2; // +2 for padding around │
+  const durWidth = DUR_SECTION_WIDTH + 1;
+  const covLabel = 'Coverage';
+  const covLabelPad = Math.floor((covWidth - covLabel.length) / 2);
+  process.stdout.write(term.clearLine);
+  console.log(c.dim(`    ${' '.repeat(leftWidth)}│${' '.repeat(covLabelPad)}${covLabel}${' '.repeat(covWidth - covLabelPad - covLabel.length)}│`));
+
   // Header row
   const headerLeft = `    ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}`;
   const headerCov = `${'Lines'.padStart(COV_COL_WIDTH)}${'Branch'.padStart(COV_COL_WIDTH)}${'Funcs'.padStart(COV_COL_WIDTH)}`;
@@ -53,9 +62,6 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
   console.log(c.dim(`${headerLeft} │ ${headerCov} │ ${headerDur}`));
 
   // Separator
-  const leftWidth = nameWidth + 31;
-  const covWidth = COV_SECTION_WIDTH + 2;
-  const durWidth = DUR_SECTION_WIDTH + 1;
   console.log(c.dim(`    ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`));
 
   // Package rows

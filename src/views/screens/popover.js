@@ -1,24 +1,29 @@
 /**
- * Popover renderer for test detail.
+ * Popover renderer for test and coverage detail.
  *
- * Renders a bottom-half panel showing details for the selected test.
+ * Renders a bottom-half panel showing details for the selected item.
  * Pure rendering — writes to stdout, does not mutate state.
  */
 
 import c from 'picocolors';
+import { readFileSync } from 'node:fs';
 import { term, stripAnsi } from '../../ui.js';
-
-/**
- * Number of fixed header lines in the popover (pinned, never scroll).
- * Line 1: separator ─
- * Line 2: test name with icon
- * Line 3: ▶ filepath (colored)
- * Line 4: separator ─ (joins box edges via ├─┤)
- */
-export const POPOVER_HEADER_LINES = 4;
+import { getLineCoverageStatus } from '../../coverage.js';
 
 /**
  * Build the popover content as header (pinned) + body (scrollable).
+ *
+ * Passed/skipped: compact (3 header lines, no body, no ├─┤)
+ *   Line 1: icon + test name
+ *   Line 2: separator ─
+ *   Line 3: ▶ filepath + right-aligned "pass: Nms" or "skipped"
+ *
+ * Failed: expanded (4 header lines + scrollable body)
+ *   Line 1: icon + test name
+ *   Line 2: separator ─
+ *   Line 3: ▶ filepath + right-aligned "failed"
+ *   Line 4: null sentinel (├─┤)
+ *   Body: duration, blank, failure message lines
  *
  * @param {object} test - { name, status, duration, failureMessage }
  * @param {string} file - Source file path
@@ -27,9 +32,6 @@ export const POPOVER_HEADER_LINES = 4;
  */
 export function buildPopoverContent(test, file, innerWidth = 74) {
   const sepWidth = Math.max(10, innerWidth - 2);
-
-  // ── Header (pinned, 4 lines) ──
-
   const header = [];
 
   // Line 1: status icon + test name
@@ -42,38 +44,54 @@ export function buildPopoverContent(test, file, innerWidth = 74) {
   // Line 2: separator
   header.push(c.dim(` ${'─'.repeat(sepWidth)}`));
 
-  // Line 3: white cursor marker + file path colored by status
+  // Line 3: ▶ filepath + right-aligned status tag
   if (file) {
-    let coloredFile;
-    if (test.status === 'passed') coloredFile = c.green(file);
-    else if (test.status === 'failed') coloredFile = c.red(file);
-    else coloredFile = c.yellow(file);
-    header.push(` ${c.white('▶')} ${coloredFile}`);
+    let coloredFile, statusTag;
+    if (test.status === 'passed') {
+      coloredFile = c.green(file);
+      const durationStr = test.duration >= 1
+        ? `${test.duration.toFixed(2)}s`
+        : `${Math.round(test.duration * 1000)}ms`;
+      statusTag = c.dim(`pass: ${durationStr}`);
+    } else if (test.status === 'failed') {
+      coloredFile = c.red(file);
+      statusTag = c.red('failed');
+    } else {
+      coloredFile = c.yellow(file);
+      statusTag = c.dim('skipped');
+    }
+
+    const leftPart = ` ${c.white('▶')} ${coloredFile}`;
+    const leftLen = stripAnsi(leftPart).length;
+    const tagLen = stripAnsi(statusTag).length;
+    const gap = Math.max(2, innerWidth - leftLen - tagLen);
+    header.push(`${leftPart}${' '.repeat(gap)}${statusTag}`);
   } else {
     header.push('');
   }
 
-  // Line 4: full-width separator (rendered as ├─┤ by renderPopover)
-  header.push(null); // sentinel: renderPopover draws ├─┤ for this
+  // Failed: add ├─┤ sentinel + scrollable body
+  if (test.status === 'failed') {
+    header.push(null); // sentinel: renderPopover draws ├─┤ for this
 
-  // ── Body (scrollable) ──
+    const body = [];
+    const durationStr = test.duration >= 1
+      ? `${test.duration.toFixed(2)}s`
+      : `${Math.round(test.duration * 1000)}ms`;
+    body.push(` ${c.dim(durationStr)}`);
 
-  const body = [];
-
-  // Duration
-  const durationStr =
-    test.duration >= 1 ? `${test.duration.toFixed(2)}s` : `${Math.round(test.duration * 1000)}ms`;
-  body.push(` ${c.dim(durationStr)}`);
-
-  // Failure message (for failed tests)
-  if (test.status === 'failed' && test.failureMessage) {
-    body.push('');
-    for (const msgLine of test.failureMessage.split('\n')) {
-      body.push(` ${c.dim(msgLine)}`);
+    if (test.failureMessage) {
+      body.push('');
+      for (const msgLine of test.failureMessage.split('\n')) {
+        body.push(` ${c.dim(msgLine)}`);
+      }
     }
+
+    return { header, body };
   }
 
-  return { header, body };
+  // Passed/skipped: compact — no body
+  return { header, body: [] };
 }
 
 /**
@@ -153,6 +171,101 @@ function renderBoxLine(line, innerWidth) {
 export function getPopoverMaxScroll(content, maxContentRows) {
   const maxBodyRows = Math.max(0, maxContentRows - content.header.length);
   return Math.max(0, content.body.length - maxBodyRows);
+}
+
+// ============================================================================
+// Coverage file popover
+// ============================================================================
+
+/**
+ * Build popover content for a coverage file detail view.
+ *
+ * Header:
+ *   Line 1: ▶ filepath + right-aligned per-file coverage pcts
+ *   Line 2: separator ─
+ *   Line 3: null sentinel (├─┤)
+ *
+ * Body: ALL source lines with coverage annotations:
+ *   "  12 │  3 │ const x = foo();"     covered (green dim)
+ *   "  13 │  0 │ if (bar) {"           uncovered (red)
+ *   "  14 │  1 │   halfCovered()"      partial (yellow)
+ *   "  15 │    │ }"                     not instrumented (dim)
+ *
+ * @param {object} opts
+ * @param {string} opts.absFile - Absolute path to source file
+ * @param {string} opts.displayPath - Relative display path
+ * @param {Map<number, number>} opts.lineHits - DA: data
+ * @param {Map<number, {total: number, taken: number}>} opts.branchHits - BRDA: data
+ * @param {object} opts.fileStats - { lines, branches, functions } percentage strings
+ * @param {number} opts.innerWidth - Inner box width
+ * @returns {{ header: string[], body: string[], selectableBodyIndices: number[] }}
+ */
+export function buildCoveragePopoverContent({ absFile, displayPath, lineHits, branchHits, fileStats, innerWidth = 74 }) {
+  const sepWidth = Math.max(10, innerWidth - 2);
+  const header = [];
+
+  // Line 1: ▶ filepath + right-aligned coverage percentages
+  const statsTag = c.dim(
+    `L:${fileStats.lines}%  B:${fileStats.branches}%  F:${fileStats.functions}%`
+  );
+  const leftPart = ` ${c.white('▶')} ${c.cyan(displayPath)}`;
+  const leftLen = stripAnsi(leftPart).length;
+  const tagLen = stripAnsi(statsTag).length;
+  const gap = Math.max(2, innerWidth - leftLen - tagLen);
+  header.push(`${leftPart}${' '.repeat(gap)}${statsTag}`);
+
+  // Line 2: separator
+  header.push(c.dim(` ${'─'.repeat(sepWidth)}`));
+
+  // Line 3: ├─┤ sentinel
+  header.push(null);
+
+  // Body: read source file and annotate each line
+  const body = [];
+  const selectableBodyIndices = [];
+
+  let sourceLines;
+  try {
+    sourceLines = readFileSync(absFile, 'utf-8').split('\n');
+  } catch {
+    body.push(c.dim(' (unable to read source file)'));
+    return { header, body, selectableBodyIndices };
+  }
+
+  // Calculate gutter widths
+  const lineNumWidth = String(sourceLines.length).length;
+
+  for (let i = 0; i < sourceLines.length; i++) {
+    const lineNum = i + 1;
+    const status = getLineCoverageStatus(lineNum, lineHits, branchHits);
+    const lineNumStr = String(lineNum).padStart(lineNumWidth);
+    const sourceLine = sourceLines[i];
+
+    let hitsStr;
+    if (status === null) {
+      hitsStr = ' '.repeat(3);
+    } else {
+      const count = lineHits.get(lineNum) ?? 0;
+      hitsStr = String(count).padStart(3);
+    }
+
+    const raw = ` ${lineNumStr} ${c.dim('│')} ${hitsStr} ${c.dim('│')} ${sourceLine}`;
+
+    if (status === 'uncovered') {
+      body.push(c.red(stripAnsi(raw)));
+      selectableBodyIndices.push(body.length - 1);
+    } else if (status === 'partial') {
+      body.push(c.yellow(stripAnsi(raw)));
+      selectableBodyIndices.push(body.length - 1);
+    } else if (status === 'covered') {
+      body.push(c.dim(c.green(stripAnsi(raw))));
+    } else {
+      // not instrumented
+      body.push(c.dim(raw));
+    }
+  }
+
+  return { header, body, selectableBodyIndices };
 }
 
 // ============================================================================

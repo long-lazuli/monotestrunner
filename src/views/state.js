@@ -31,6 +31,9 @@ export function createViewState() {
     coverage: {
       selectedIndex: 0,
       scrollOffset: 0,
+      popoverVisible: false,
+      popoverScrollOffset: 0,
+      popoverCursorIndex: -1, // index into selectableBodyIndices
     },
   };
 }
@@ -141,6 +144,9 @@ export function resetTestsState(viewState) {
 export function resetCoverageState(viewState) {
   viewState.coverage.selectedIndex = 0;
   viewState.coverage.scrollOffset = 0;
+  viewState.coverage.popoverVisible = false;
+  viewState.coverage.popoverScrollOffset = 0;
+  viewState.coverage.popoverCursorIndex = -1;
 }
 
 // ============================================================================
