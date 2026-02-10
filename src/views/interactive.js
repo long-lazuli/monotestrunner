@@ -12,6 +12,7 @@
 
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
 
 import { term, spinner, createInitialState } from '../ui.js';
@@ -129,6 +130,16 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
  */
 export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false, isSinglePackage = false) {
 
+  // Resolve workspace name: package.json name → folder basename
+  let workspaceName = basename(rootDir);
+  try {
+    const rootPkgPath = join(rootDir, 'package.json');
+    if (existsSync(rootPkgPath)) {
+      const rootPkg = JSON.parse(readFileSync(rootPkgPath, 'utf-8'));
+      if (rootPkg.name) workspaceName = rootPkg.name;
+    }
+  } catch { /* fallback to folder name */ }
+
   // Filter runnable packages for running (keep all for display)
   const testablePackages = packages.filter(isRunnable);
   // ── State ──
@@ -177,6 +188,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
           spinnerIdx: viewState.spinnerIdx,
           watchEnabled: viewState.watchEnabled,
           statusMessage,
+          workspaceName,
         });
         break;
 

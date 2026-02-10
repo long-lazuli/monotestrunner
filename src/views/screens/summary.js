@@ -35,7 +35,7 @@ const DUR_SECTION_WIDTH = 10;
  * @param {boolean} opts.watchEnabled - Watch mode active
  * @param {string} opts.statusMessage - Status bar message
  */
-export function renderSummary({ packages, states, coverageFlags, summaryState, cursorDimmed, spinnerIdx, watchEnabled, statusMessage }) {
+export function renderSummary({ packages, states, coverageFlags, summaryState, cursorDimmed, spinnerIdx, watchEnabled, statusMessage, workspaceName }) {
   const nameWidth = Math.max(20, ...packages.map((p) => p.name.length + (p.runner || '').length + 3));
   const sep = c.dim('│');
 
@@ -43,8 +43,9 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
 
   // Title
   const modeLabel = watchEnabled ? `(${c.yellow('watching')})` : '(interactive)';
+  const nameLabel = workspaceName ? `${c.bold(c.magenta(workspaceName))} ${c.dim('–')} ` : '';
   process.stdout.write(term.clearLine);
-  console.log(`${c.bold(c.cyan('Test & Coverage Summary'))} ${c.dim(modeLabel)}\n`);
+  console.log(`${nameLabel}${c.bold(c.cyan('Test & Coverage Summary'))} ${c.dim(modeLabel)}\n`);
 
   // Section label row (coverage group header)
   const leftWidth = nameWidth + 31;
