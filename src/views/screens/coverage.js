@@ -279,9 +279,16 @@ function renderCoverageSplitView(covRows, selectableIndices, coverageState, curs
     const bodyIdx = popoverContent.selectableBodyIndices[coverageState.popoverCursorIndex];
     if (bodyIdx !== undefined && bodyIdx < popoverContent.body.length) {
       const marker = cursorDimmed ? c.gray('▶') : '▶';
-      // Replace leading space with marker
+      // Replace leading space with marker — strip ANSI first to avoid
+      // slicing into escape codes, then re-apply the original color.
       const line = popoverContent.body[bodyIdx];
-      popoverContent.body[bodyIdx] = marker + (line ? line.slice(1) : '');
+      const plain = stripAnsi(line);
+      const rest = plain.slice(1);
+      // Detect original color from the ANSI prefix (e.g. \x1b[31m for red)
+      const ansiMatch = line.match(/^(\x1b\[[0-9;]*m)/);
+      const colorStart = ansiMatch ? ansiMatch[1] : '';
+      const colorEnd = ansiMatch ? '\x1b[0m' : '';
+      popoverContent.body[bodyIdx] = `${marker}${colorStart}${rest}${colorEnd}`;
     }
   }
 
