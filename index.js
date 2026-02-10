@@ -29,7 +29,16 @@ import {
   countVitestDots,
   countBunDots,
 } from './parsers.js';
-import { loadConfig, validateConfig } from './config.js';
+import { loadConfig, validateConfig, detectPackageManager, getPackageRunCommand } from './config.js';
+import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
+import {
+  printCoverageTable,
+  printVerboseCoverage,
+  createInitialCoverageState,
+  renderCoverageHeader,
+  renderCoverageRow,
+  renderCoverageTotals,
+} from './ui.js';
 
 const cli = meow(`
   Usage
@@ -38,12 +47,14 @@ const cli = meow(`
   Options
     -i, --interactive  Interactive mode with keyboard navigation
     -w, --watch        Interactive mode with file watching (implies -i)
-    -v, --verbose      Show detailed output for failed tests
+    -c, --coverage     Run tests with coverage enabled
+    -v, --verbose      Show detailed output (failed tests + per-file coverage)
 
   Examples
     $ pnpm test        Run all tests once
     $ pnpm test -i     Interactive mode
     $ pnpm test -w     Interactive mode with file watching
+    $ pnpm test -c     Run with coverage
 `, {
   importMeta: import.meta,
   flags: {
@@ -55,6 +66,10 @@ const cli = meow(`
       type: 'boolean',
       shortFlag: 'w',
     },
+    coverage: {
+      type: 'boolean',
+      shortFlag: 'c',
+    },
     verbose: {
       type: 'boolean',
       shortFlag: 'v',
@@ -65,6 +80,7 @@ const cli = meow(`
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '../..');
 const verbose = cli.flags.verbose;
+const coverage = cli.flags.coverage;
 const watchInitial = cli.flags.watch;
 const interactive = cli.flags.interactive || watchInitial; // -w implies -i
 const isCI = process.env.CI === 'true';
@@ -109,16 +125,26 @@ function findPackages() {
 
 /**
  * Run tests for a package with streaming dot output
+ * @param {object} pkg - Package to run tests for
+ * @param {object} state - State object for this package
+ * @param {Function} onUpdate - Callback when state changes
+ * @param {boolean} coverageEnabled - Whether to run with coverage
  */
-function runTestsWithStreaming(pkg, state, onUpdate) {
+function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = false) {
   return new Promise((resolve) => {
     let command, args;
     if (pkg.runner === 'vitest') {
       command = 'pnpm';
       args = ['vitest', 'run', '--reporter=dot'];
+      if (coverageEnabled) {
+        args.push('--coverage');
+      }
     } else {
       command = 'bun';
       args = ['test', '--dots'];
+      if (coverageEnabled) {
+        args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
+      }
     }
 
     const child = spawn(command, args, {
@@ -160,6 +186,11 @@ function runTestsWithStreaming(pkg, state, onUpdate) {
       state.duration = final.duration;
       state.output = output;
 
+      // Get coverage data if coverage is enabled
+      if (coverageEnabled) {
+        state.coverage = getPackageCoverage(pkg);
+      }
+
       onUpdate();
       resolve();
     });
@@ -169,7 +200,7 @@ function runTestsWithStreaming(pkg, state, onUpdate) {
 /**
  * Redraw all rows
  */
-function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines) {
+function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, coverageEnabled = false) {
   process.stdout.write(term.moveUp(totalLines));
 
   for (const pkg of packages) {
@@ -181,12 +212,51 @@ function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLi
   console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
   process.stdout.write('\r' + term.clearLine);
   console.log(renderTotals(states, nameWidth));
+
+  // Coverage section
+  if (coverageEnabled) {
+    const covLineWidth = nameWidth + 2 + 7 + 8 + 8;
+
+    // Build coverageStates from states
+    const coverageStates = {};
+    for (const pkg of packages) {
+      const state = states[pkg.name];
+      if (state.coverage) {
+        coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
+      } else if (state.status === 'done') {
+        coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
+      } else {
+        coverageStates[pkg.name] = createInitialCoverageState();
+      }
+    }
+
+    process.stdout.write('\r' + term.clearLine);
+    console.log();  // blank line
+    process.stdout.write('\r' + term.clearLine);
+    console.log(`${c.bold(c.cyan('Coverage Summary'))}`);  // title (no extra newline)
+    process.stdout.write('\r' + term.clearLine);
+    console.log();  // blank line after title
+    process.stdout.write('\r' + term.clearLine);
+    console.log(renderCoverageHeader(nameWidth));
+    process.stdout.write('\r' + term.clearLine);
+    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+
+    for (const pkg of packages) {
+      process.stdout.write('\r' + term.clearLine);
+      console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
+    }
+
+    process.stdout.write('\r' + term.clearLine);
+    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+    process.stdout.write('\r' + term.clearLine);
+    console.log(renderCoverageTotals(coverageStates, nameWidth));
+  }
 }
 
 /**
  * Main function - TTY mode with real-time updates
  */
-async function runTTY(packages) {
+async function runTTY(packages, coverageEnabled = false) {
   // nameWidth includes space for runner suffix: "pkg-name (vitest)"
   const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
@@ -205,6 +275,21 @@ async function runTTY(packages) {
   printSeparator(lineWidth);
   console.log(renderTotals(states, nameWidth));
 
+  // Initial coverage section (if enabled)
+  if (coverageEnabled) {
+    const covLineWidth = nameWidth + 2 + 7 + 8 + 8;
+    console.log();  // blank line
+    console.log(`${c.bold(c.cyan('Coverage Summary'))}`);  // title
+    console.log();  // blank line after title
+    console.log(renderCoverageHeader(nameWidth));
+    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+    for (const pkg of packages) {
+      console.log(renderCoverageRow(pkg.name, createInitialCoverageState(), nameWidth));
+    }
+    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+    console.log(renderCoverageTotals({}, nameWidth));
+  }
+
   process.stdout.write(term.hideCursor);
 
   const cleanup = () => {
@@ -213,23 +298,27 @@ async function runTTY(packages) {
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(1); });
 
-  const totalLines = packages.length + 2;
+  // Total lines includes: packages + separator + totals row
+  // Plus coverage section if enabled: blank + title + blank + header + separator + packages + separator + totals
+  const testTableLines = packages.length + 2;
+  const coverageTableLines = coverageEnabled ? (1 + 1 + 1 + 1 + 1 + packages.length + 1 + 1) : 0;
+  const totalLines = testTableLines + coverageTableLines;
   let spinnerIdx = 0;
 
   const renderInterval = setInterval(() => {
     spinnerIdx++;
-    redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines);
+    redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, coverageEnabled);
   }, 80);
 
   const promises = packages.map(async (pkg) => {
     states[pkg.name].status = 'running';
-    await runTestsWithStreaming(pkg, states[pkg.name], () => {});
+    await runTestsWithStreaming(pkg, states[pkg.name], () => {}, coverageEnabled);
   });
 
   await Promise.all(promises);
 
   clearInterval(renderInterval);
-  redrawTable(packages, states, 0, nameWidth, lineWidth, totalLines);
+  redrawTable(packages, states, 0, nameWidth, lineWidth, totalLines, coverageEnabled);
 
   process.stdout.write(term.showCursor);
 
@@ -252,13 +341,26 @@ async function runTTY(packages) {
     }
   }
 
+  // Verbose coverage output
+  if (coverageEnabled && verbose) {
+    const pkgsWithPaths = packages.map(pkg => ({
+      name: pkg.name,
+      dir: pkg.dir,
+      path: pkg.path,
+    }));
+    const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+    if (verboseData.packageDisplayData.length > 0) {
+      printVerboseCoverage(verboseData);
+    }
+  }
+
   return totals.failed > 0 ? 1 : 0;
 }
 
 /**
  * Main function - CI mode (no interactive updates)
  */
-async function runCI(packages) {
+async function runCI(packages, coverageEnabled = false) {
   // nameWidth includes space for runner suffix: "pkg-name (vitest)"
   const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
@@ -271,7 +373,7 @@ async function runCI(packages) {
     states[pkg.name] = createInitialState();
     states[pkg.name].status = 'running';
 
-    await runTestsWithStreaming(pkg, states[pkg.name], () => {});
+    await runTestsWithStreaming(pkg, states[pkg.name], () => {}, coverageEnabled);
     console.log(renderRow(pkg, states[pkg.name], 0, nameWidth));
   }
 
@@ -292,6 +394,33 @@ async function runCI(packages) {
       if (state.failed > 0 || state.exitCode !== 0) {
         console.log(`\n${c.bold(c.red(pkg.name))}\n`);
         console.log(state.output);
+      }
+    }
+  }
+
+  // Coverage table (CI mode - printed after all tests complete)
+  if (coverageEnabled) {
+    const coverageStates = {};
+    for (const pkg of packages) {
+      const state = states[pkg.name];
+      if (state.coverage) {
+        coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
+      } else {
+        coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
+      }
+    }
+    printCoverageTable(packages, coverageStates, nameWidth);
+
+    // Verbose coverage output
+    if (verbose) {
+      const pkgsWithPaths = packages.map(pkg => ({
+        name: pkg.name,
+        dir: pkg.dir,
+        path: pkg.path,
+      }));
+      const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+      if (verboseData.packageDisplayData.length > 0) {
+        printVerboseCoverage(verboseData);
       }
     }
   }
@@ -318,10 +447,10 @@ async function main() {
   }
 
   if (interactive) {
-    await runInteractiveMode(packages, rootDir, config, watchInitial);
+    await runInteractiveMode(packages, rootDir, config, watchInitial, coverage);
     // Interactive mode doesn't exit normally
   } else {
-    const exitCode = isInteractiveTTY ? await runTTY(packages) : await runCI(packages);
+    const exitCode = isInteractiveTTY ? await runTTY(packages, coverage) : await runCI(packages, coverage);
     // Only exit with error code in CI to avoid pnpm ELIFECYCLE noise locally
     process.exit(isCI ? exitCode : 0);
   }

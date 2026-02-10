@@ -189,8 +189,12 @@ export function renderHelp(lineWidth) {
     '    r/Enter   Rerun selected package',
     '    a         Rerun all packages',
     '',
-    '  Other',
+    '  Modes',
+    '    c         Toggle coverage',
+    '    v         Toggle verbose (per-file coverage)',
     '    w         Toggle watch mode',
+    '',
+    '  Other',
     '    h         Show this help',
     '    q         Quit',
     '',
@@ -249,15 +253,16 @@ export function printSummary(failed) {
 /**
  * Format coverage percentage with color
  * @param {string} pct - Percentage string or '-'
+ * @param {number} width - Column width (default 7)
  * @returns {string} - Colored percentage string
  */
-export function formatCoveragePct(pct) {
+export function formatCoveragePct(pct, width = 7) {
   if (pct === '-' || pct === null || pct === undefined) {
-    return c.dim('     -');
+    return c.dim('-'.padStart(width));
   }
   const num = parseFloat(pct);
   const color = num >= 80 ? c.green : num >= 60 ? c.yellow : c.red;
-  return color(`${pct.padStart(5)}%`);
+  return color(`${(pct + '%').padStart(width)}`);
 }
 
 /**
@@ -277,7 +282,7 @@ export function createInitialCoverageState() {
  * @param {number} nameWidth - Width for package name column
  */
 export function renderCoverageHeader(nameWidth) {
-  return c.dim(`  ${'Package'.padEnd(nameWidth)}${'Lines'.padStart(7)}${'Branch'.padStart(8)}${'Funcs'.padStart(8)}`);
+  return c.dim(`  ${'Package'.padEnd(nameWidth)}${'Lines'.padStart(8)}${'Branch'.padStart(8)}${'Funcs'.padStart(8)}`);
 }
 
 /**
@@ -290,16 +295,16 @@ export function renderCoverageRow(pkgName, coverageState, nameWidth) {
   const name = `  ${c.blue(pkgName.padEnd(nameWidth))}`;
   
   if (!coverageState || coverageState.status === 'pending') {
-    return c.dim(`  ${pkgName.padEnd(nameWidth)}${'-'.padStart(7)}${'-'.padStart(8)}${'-'.padStart(8)}`);
+    return c.dim(`  ${pkgName.padEnd(nameWidth)}${'-'.padStart(8)}${'-'.padStart(8)}${'-'.padStart(8)}`);
   }
   
   if (coverageState.status === 'loading') {
-    return `${name}${c.dim('...'.padStart(7))}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}`;
+    return `${name}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}`;
   }
   
-  const linesStr = formatCoveragePct(coverageState.lines);
-  const branchStr = formatCoveragePct(coverageState.branches);
-  const funcsStr = formatCoveragePct(coverageState.functions);
+  const linesStr = formatCoveragePct(coverageState.lines, 8);
+  const branchStr = formatCoveragePct(coverageState.branches, 8);
+  const funcsStr = formatCoveragePct(coverageState.functions, 8);
   
   return `${name}${linesStr}${branchStr}${funcsStr}`;
 }
@@ -342,9 +347,9 @@ export function renderCoverageTotals(coverageStates, nameWidth) {
   const avgBranches = totals.branchesTotal ? (totals.branchesHit / totals.branchesTotal).toFixed(1) : '-';
   const avgFunctions = totals.functionsTotal ? (totals.functionsHit / totals.functionsTotal).toFixed(1) : '-';
   
-  const linesStr = hasAny ? formatCoveragePct(avgLines) : c.dim('-'.padStart(7));
-  const branchStr = hasAny ? formatCoveragePct(avgBranches) : c.dim('-'.padStart(8));
-  const funcsStr = hasAny ? formatCoveragePct(avgFunctions) : c.dim('-'.padStart(8));
+  const linesStr = hasAny ? formatCoveragePct(avgLines, 8) : c.dim('-'.padStart(8));
+  const branchStr = hasAny ? formatCoveragePct(avgBranches, 8) : c.dim('-'.padStart(8));
+  const funcsStr = hasAny ? formatCoveragePct(avgFunctions, 8) : c.dim('-'.padStart(8));
   
   return `  ${c.bold('Total'.padEnd(nameWidth))}${linesStr}${branchStr}${funcsStr}`;
 }
@@ -356,7 +361,7 @@ export function renderCoverageTotals(coverageStates, nameWidth) {
  * @param {number} nameWidth - Width for package name column
  */
 export function printCoverageTable(packages, coverageStates, nameWidth) {
-  const lineWidth = nameWidth + 2 + 7 + 8 + 8;
+  const lineWidth = nameWidth + 2 + 8 + 8 + 8;
   
   console.log(`\n${c.bold(c.cyan('Coverage Summary'))}\n`);
   console.log(renderCoverageHeader(nameWidth));
@@ -380,12 +385,12 @@ export function printVerboseCoverage(verboseData) {
   console.log(`\n${c.bold(c.cyan('Coverage Details'))}\n`);
   
   for (const { name, relevantFiles, displayPaths, stats } of packageDisplayData) {
-    const linesStr = formatCoveragePct(stats.lines);
-    const branchStr = formatCoveragePct(stats.branches);
-    const funcsStr = formatCoveragePct(stats.functions);
+    const linesStr = formatCoveragePct(stats.lines, 8);
+    const branchStr = formatCoveragePct(stats.branches, 8);
+    const funcsStr = formatCoveragePct(stats.functions, 8);
     
     console.log(`${c.bold(name.padEnd(fileWidth + 2))}  ${linesStr}  ${branchStr}  ${funcsStr}`);
-    console.log(c.dim('─'.repeat(fileWidth + 28)));
+    console.log(c.dim('─'.repeat(fileWidth + 30)));
     
     for (let i = 0; i < relevantFiles.length; i++) {
       const f = relevantFiles[i];
@@ -395,7 +400,7 @@ export function printVerboseCoverage(verboseData) {
       const fFunctions = f.functionsTotal ? ((f.functionsHit / f.functionsTotal) * 100).toFixed(1) : '-';
       
       console.log(
-        `  ${c.dim(relPath.padEnd(fileWidth))}  ${formatCoveragePct(fLines)}  ${formatCoveragePct(fBranches)}  ${formatCoveragePct(fFunctions)}`
+        `  ${c.dim(relPath.padEnd(fileWidth))}  ${formatCoveragePct(fLines, 8)}  ${formatCoveragePct(fBranches, 8)}  ${formatCoveragePct(fFunctions, 8)}`
       );
     }
     console.log();

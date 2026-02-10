@@ -10,10 +10,16 @@ import {
   term,
   spinner,
   createInitialState,
+  createInitialCoverageState,
   renderInteractiveRow,
   renderTotals,
   renderHelp,
+  renderCoverageHeader,
+  renderCoverageRow,
+  renderCoverageTotals,
+  formatCoveragePct,
 } from './ui.js';
+import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
 import { createWatcherManager } from './watcher.js';
 import {
   parseVitestFinal,
@@ -30,8 +36,9 @@ import {
  * @param {Map} childProcesses - Map of running child processes
  * @param {Set} pendingReruns - Set of package names queued for rerun
  * @param {Function} onComplete - Callback when tests complete (for deferred reruns)
+ * @param {boolean} coverageEnabled - Whether to run with coverage
  */
-function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, onComplete) {
+function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled = false) {
   return new Promise((resolve) => {
     // Reset state
     state.status = 'running';
@@ -43,6 +50,7 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
     state.duration = null;
     state.exitCode = null;
     state.output = '';
+    state.coverage = null;
 
     onUpdate();
 
@@ -51,9 +59,15 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
     if (pkg.runner === 'vitest') {
       command = 'pnpm';
       args = ['vitest', 'run', '--reporter=dot'];
+      if (coverageEnabled) {
+        args.push('--coverage');
+      }
     } else {
       command = 'bun';
       args = ['test', '--dots'];
+      if (coverageEnabled) {
+        args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
+      }
     }
 
     const child = spawn(command, args, {
@@ -97,6 +111,11 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
       state.duration = final.duration;
       state.output = output;
 
+      // Get coverage data if coverage is enabled
+      if (coverageEnabled) {
+        state.coverage = getPackageCoverage(pkg);
+      }
+
       childProcesses.delete(pkg.name);
       onUpdate();
       
@@ -113,9 +132,9 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
 /**
  * Run all packages in parallel
  */
-function runAllPackages(packages, states, onUpdate, childProcesses, pendingReruns, onComplete) {
+function runAllPackages(packages, states, onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled = false) {
   const promises = packages.map((pkg) =>
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onComplete)
+    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled)
   );
   return Promise.all(promises);
 }
@@ -126,8 +145,9 @@ function runAllPackages(packages, states, onUpdate, childProcesses, pendingRerun
  * @param {string} rootDir - Workspace root directory
  * @param {object} config - Config object with optional watchMappings
  * @param {boolean} initialWatchEnabled - Whether to start with watch enabled
+ * @param {boolean} initialCoverageEnabled - Whether to start with coverage enabled
  */
-export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false) {
+export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false) {
   // nameWidth includes space for runner suffix: "pkg-name (vitest)"
   const nameWidth = Math.max(20, ...packages.map((p) => p.name.length + p.runner.length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
@@ -144,6 +164,8 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     showingHelp: false,
     currentCommand: '',
     watchEnabled: initialWatchEnabled,
+    coverageEnabled: initialCoverageEnabled,
+    verboseEnabled: false,
     cursorDimmed: false,
   };
   
@@ -211,12 +233,90 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     process.stdout.write(term.clearLine);
     console.log(renderTotals(states, nameWidth));
 
+    // Coverage section (if enabled)
+    if (uiState.coverageEnabled) {
+      const covLineWidth = nameWidth + 2 + 8 + 8 + 8;
+
+      // Build coverageStates from states
+      const coverageStates = {};
+      for (const pkg of packages) {
+        const state = states[pkg.name];
+        if (state.coverage) {
+          coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
+        } else if (state.status === 'done') {
+          coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
+        } else {
+          coverageStates[pkg.name] = createInitialCoverageState();
+        }
+      }
+
+      process.stdout.write(term.clearLine);
+      console.log();  // blank line
+      process.stdout.write(term.clearLine);
+      const verboseLabel = uiState.verboseEnabled ? ` ${c.dim('(verbose)')}` : '';
+      console.log(`${c.bold(c.cyan('Coverage Summary'))}${verboseLabel}`);
+      process.stdout.write(term.clearLine);
+      console.log();  // blank line after title
+
+      if (uiState.verboseEnabled) {
+        // Verbose mode: show per-file coverage
+        const pkgsWithPaths = packages.map(pkg => ({
+          name: pkg.name,
+          dir: pkg.dir,
+          path: pkg.path,
+        }));
+        const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+        
+        for (const { name, relevantFiles, displayPaths, stats } of verboseData.packageDisplayData) {
+          process.stdout.write(term.clearLine);
+          const linesStr = formatCoveragePct(stats.lines, 8);
+          const branchStr = formatCoveragePct(stats.branches, 8);
+          const funcsStr = formatCoveragePct(stats.functions, 8);
+          console.log(`${c.bold(c.blue(name.padEnd(verboseData.fileWidth + 2)))}  ${linesStr}  ${branchStr}  ${funcsStr}`);
+          
+          process.stdout.write(term.clearLine);
+          console.log(c.dim('─'.repeat(verboseData.fileWidth + 30)));
+          
+          for (let i = 0; i < relevantFiles.length; i++) {
+            const f = relevantFiles[i];
+            const relPath = displayPaths[i];
+            const fLines = f.linesTotal ? ((f.linesHit / f.linesTotal) * 100).toFixed(1) : '-';
+            const fBranches = f.branchesTotal ? ((f.branchesHit / f.branchesTotal) * 100).toFixed(1) : '-';
+            const fFunctions = f.functionsTotal ? ((f.functionsHit / f.functionsTotal) * 100).toFixed(1) : '-';
+            
+            process.stdout.write(term.clearLine);
+            console.log(
+              `  ${c.dim(relPath.padEnd(verboseData.fileWidth))}  ${formatCoveragePct(fLines, 8)}  ${formatCoveragePct(fBranches, 8)}  ${formatCoveragePct(fFunctions, 8)}`
+            );
+          }
+          process.stdout.write(term.clearLine);
+          console.log();
+        }
+      } else {
+        // Normal mode: show package-level coverage
+        process.stdout.write(term.clearLine);
+        console.log(renderCoverageHeader(nameWidth));
+        process.stdout.write(term.clearLine);
+        console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+
+        for (const pkg of packages) {
+          process.stdout.write(term.clearLine);
+          console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
+        }
+
+        process.stdout.write(term.clearLine);
+        console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+        process.stdout.write(term.clearLine);
+        console.log(renderCoverageTotals(coverageStates, nameWidth));
+      }
+    }
+
     // Status lines
     console.log();
     process.stdout.write(term.clearLine);
     console.log(c.dim(uiState.currentCommand || ' '));
     process.stdout.write(term.clearLine);
-    console.log(c.dim('↑↓ navigate  r:rerun  a:rerun all  w:watch mode  h:help  q:quit'));
+    console.log(c.dim('↑↓ navigate  r:rerun  a:rerun all  c:coverage  v:verbose  w:watch  h:help  q:quit'));
   };
 
   const onUpdate = () => {
@@ -238,7 +338,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     if (pendingReruns.has(pkg.name)) {
       pendingReruns.delete(pkg.name);
       uiState.currentCommand = `[${pkg.name}] Rerunning (queued)...`;
-      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete);
+      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
     }
   };
   
@@ -260,12 +360,12 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
    * Actually run all packages now
    */
   const runAllNow = () => {
-    uiState.currentCommand = 'Running all packages...';
+    uiState.currentCommand = uiState.coverageEnabled ? 'Running all packages with coverage...' : 'Running all packages...';
     const promises = packages.map((pkg) =>
       runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (completedPkg) => {
         onPackageComplete(completedPkg);
         checkPendingRunAll();
-      })
+      }, uiState.coverageEnabled)
     );
     Promise.all(promises);
   };
@@ -282,8 +382,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       onUpdate();
       return;
     }
-    uiState.currentCommand = `[${pkg.name}] ${pkg.runner === 'vitest' ? 'pnpm vitest run --reporter=dot' : 'bun test --dots'}`;
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete);
+    const covSuffix = uiState.coverageEnabled ? ' --coverage' : '';
+    uiState.currentCommand = `[${pkg.name}] ${pkg.runner === 'vitest' ? 'pnpm vitest run --reporter=dot' : 'bun test --dots'}${covSuffix}`;
+    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
   };
   
   /**
@@ -298,7 +399,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       return;
     }
     uiState.currentCommand = message || `[${pkg.name}] Running...`;
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete);
+    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
   };
 
   /**
@@ -430,6 +531,39 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
         return;
       }
 
+      // Toggle coverage mode
+      if (str === 'c') {
+        uiState.coverageEnabled = !uiState.coverageEnabled;
+        if (uiState.coverageEnabled) {
+          uiState.currentCommand = 'Coverage enabled - rerunning all packages...';
+          // Clear screen to accommodate coverage section
+          process.stdout.write(term.clearScreen);
+          runAll();
+        } else {
+          uiState.verboseEnabled = false;  // Also disable verbose when disabling coverage
+          uiState.currentCommand = 'Coverage disabled';
+          // Clear screen since we're removing coverage section
+          process.stdout.write(term.clearScreen);
+          redraw();
+        }
+        return;
+      }
+
+      // Toggle verbose mode (only when coverage is enabled)
+      if (str === 'v') {
+        if (uiState.coverageEnabled) {
+          uiState.verboseEnabled = !uiState.verboseEnabled;
+          uiState.currentCommand = uiState.verboseEnabled ? 'Verbose coverage enabled' : 'Verbose coverage disabled';
+          // Clear screen to adjust for different content size
+          process.stdout.write(term.clearScreen);
+          redraw();
+        } else {
+          uiState.currentCommand = 'Enable coverage first (c) to use verbose mode';
+          redraw();
+        }
+        return;
+      }
+
       // Toggle watch mode
       if (str === 'w') {
         uiState.watchEnabled = !uiState.watchEnabled;
@@ -495,11 +629,11 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
   }, spinner.interval);
 
   // Run all tests initially
-  uiState.currentCommand = 'Running all packages...';
+  uiState.currentCommand = uiState.coverageEnabled ? 'Running all packages with coverage...' : 'Running all packages...';
   await runAllPackages(packages, states, onUpdate, childProcesses, pendingReruns, (completedPkg) => {
     onPackageComplete(completedPkg);
     checkPendingRunAll();
-  });
+  }, uiState.coverageEnabled);
 
   // Clear the "Running all packages..." message
   uiState.currentCommand = '';

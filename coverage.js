@@ -1,15 +1,12 @@
-#!/usr/bin/env node
 /**
  * Coverage Summary Module
  *
- * Parses and displays coverage data from lcov.info files.
- * Can be used standalone or imported by monotestrunner.
+ * Parses coverage data from lcov.info files.
+ * Library module imported by monotestrunner.
  */
 
-import { existsSync, statSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
-import { join, dirname, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 // ============================================================================
 // Parsing Functions
@@ -207,46 +204,6 @@ export function findPackagesWithCoverage(rootDir) {
 }
 
 // ============================================================================
-// Coverage Merging
-// ============================================================================
-
-/**
- * Merge all package lcov.info files into a single file
- * @param {string} rootDir - Workspace root directory
- * @returns {string|null} - Path to merged lcov.info or null on failure
- */
-export function mergeCoverageFiles(rootDir) {
-  const coverageDir = join(rootDir, 'coverage');
-  mkdirSync(coverageDir, { recursive: true });
-
-  const mergedLcov = join(coverageDir, 'lcov.info');
-
-  try {
-    execSync(
-      `npx lcov-result-merger './{packages,plugins,apps}/*/coverage/lcov.info' '${mergedLcov}'`,
-      { cwd: rootDir, stdio: 'pipe' }
-    );
-    return mergedLcov;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get merged lcov file info (size, path)
- * @param {string} mergedLcovPath - Path to merged lcov.info
- * @returns {object|null} - Object with path and sizeKb or null
- */
-export function getMergedCoverageInfo(mergedLcovPath) {
-  if (!existsSync(mergedLcovPath)) return null;
-  const stats = statSync(mergedLcovPath);
-  return {
-    path: mergedLcovPath,
-    sizeKb: (stats.size / 1024).toFixed(1),
-  };
-}
-
-// ============================================================================
 // Verbose Coverage Data
 // ============================================================================
 
@@ -289,102 +246,4 @@ export function getVerboseCoverageData(rootDir, packages) {
   const fileWidth = Math.max(40, ...allDisplayPaths.map(p => p.length));
 
   return { packageDisplayData, fileWidth };
-}
-
-// ============================================================================
-// Standalone CLI
-// ============================================================================
-
-// ANSI colors for standalone mode
-const colors = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  red: '\x1b[31m',
-  cyan: '\x1b[36m',
-  dim: '\x1b[2m',
-};
-
-function colorize(pct) {
-  if (pct === '-') return `${colors.dim}     -${colors.reset}`;
-  const num = parseFloat(pct);
-  const color = num >= 80 ? colors.green : num >= 60 ? colors.yellow : colors.red;
-  return `${color}${pct.padStart(5)}%${colors.reset}`;
-}
-
-function main() {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const rootDir = join(__dirname, '..');
-  const verbose = process.argv.includes('--verbose') || process.argv.includes('-v');
-
-  const packages = findPackagesWithCoverage(rootDir);
-
-  console.log(`\n${colors.bold}${colors.cyan}Coverage Summary${colors.reset}\n`);
-
-  if (verbose) {
-    const { packageDisplayData, fileWidth } = getVerboseCoverageData(rootDir, packages);
-
-    for (const { name, relevantFiles, displayPaths, stats } of packageDisplayData) {
-      console.log(`${colors.bold}${name.padEnd(fileWidth + 2)}${colors.reset}  ${colorize(stats.lines)}  ${colorize(stats.branches)}  ${colorize(stats.functions)}`);
-      console.log(`${colors.dim}${'─'.repeat(fileWidth + 26)}${colors.reset}`);
-
-      for (let i = 0; i < relevantFiles.length; i++) {
-        const f = relevantFiles[i];
-        const relPath = displayPaths[i];
-        const fStats = formatFileStats(f);
-        console.log(
-          `  ${colors.dim}${relPath.padEnd(fileWidth)}${colors.reset}  ${colorize(fStats.lines)}  ${colorize(fStats.branches)}  ${colorize(fStats.functions)}`
-        );
-      }
-      console.log();
-    }
-  } else {
-    const results = packages
-      .map(pkg => {
-        const stats = getPackageCoverage(pkg);
-        if (stats) {
-          return { name: pkg.name, ...stats };
-        }
-        return null;
-      })
-      .filter(Boolean);
-
-    if (results.length > 0) {
-      const nameWidth = Math.max(20, ...results.map(r => r.name.length));
-
-      console.log(`${colors.dim}${'Package'.padEnd(nameWidth + 2)}  ${'Lines'.padStart(6)}  ${'Branch'.padStart(6)}  ${'Funcs'.padStart(6)}${colors.reset}`);
-      console.log(`${colors.dim}${'─'.repeat(nameWidth + 26)}${colors.reset}`);
-
-      for (const r of results) {
-        console.log(
-          `  ${r.name.padEnd(nameWidth)}  ${colorize(r.lines)}  ${colorize(r.branches)}  ${colorize(r.functions)}`
-        );
-      }
-
-      console.log();
-    }
-  }
-
-  // Merge coverage files
-  const mergedLcov = mergeCoverageFiles(rootDir);
-  const mergedInfo = mergedLcov ? getMergedCoverageInfo(mergedLcov) : null;
-
-  if (mergedInfo) {
-    console.log(`${colors.green}✓${colors.reset} Merged: coverage/lcov.info (${mergedInfo.sizeKb} KB)`);
-  } else {
-    console.log(`${colors.red}✗${colors.reset} Failed to merge coverage files`);
-  }
-
-  console.log();
-}
-
-// Run main if executed directly
-const isMain = process.argv[1] && (
-  process.argv[1].endsWith('coverage.js') ||
-  process.argv[1].includes('monotestrunner/coverage')
-);
-
-if (isMain) {
-  main();
 }
