@@ -172,6 +172,222 @@ export function renderInteractiveRow(pkg, state, spinnerIdx, nameWidth, selected
   return `${name}${c.dim(`${formatNum(state.files)}${formatNum(state.tests)}`)}${passStr}${skipStr}${failStr}${c.dim(formatDuration(state.duration))}`;
 }
 
+// ============================================================================
+// Coverage-Inline Functions (unified test + coverage table)
+// ============================================================================
+
+// Layout: Package  Files Tests  Pass  Skip  Fail │  Lines  Branch   Funcs │ Duration
+const COV_COL_WIDTH = 8;
+const COV_SECTION_WIDTH = COV_COL_WIDTH * 3;
+const DUR_SECTION_WIDTH = 10;
+
+/**
+ * Format coverage columns with threshold-aware coloring.
+ * @param {object|null} coverage - Coverage data with lines/branches/functions and optional thresholds
+ * @param {boolean} isPending - Whether data is still loading
+ * @returns {{ text: string, statuses: string[] }} - Formatted text and per-column statuses
+ */
+function formatCoverageColumns(coverage, isPending = false) {
+  if (isPending || !coverage) {
+    return {
+      text: `${c.dim('-'.padStart(COV_COL_WIDTH))}${c.dim('-'.padStart(COV_COL_WIDTH))}${c.dim('-'.padStart(COV_COL_WIDTH))}`,
+      statuses: ['none', 'none', 'none'],
+    };
+  }
+  const th = coverage.thresholds || {};
+  const lines = formatCoveragePct(coverage.lines, COV_COL_WIDTH, th.lines);
+  const branches = formatCoveragePct(coverage.branches, COV_COL_WIDTH, th.branches);
+  const functions = formatCoveragePct(coverage.functions, COV_COL_WIDTH, th.functions);
+  return {
+    text: `${lines.text}${branches.text}${functions.text}`,
+    statuses: [lines.status, branches.status, functions.status],
+  };
+}
+
+/**
+ * Render header row with coverage columns
+ * Layout: Package  Files Tests  Pass  Skip  Fail │  Lines  Branch   Funcs │ Duration
+ */
+export function renderInteractiveHeaderWithCoverage(nameWidth) {
+  const left = `  ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}`;
+  const cov = `${'Lines'.padStart(COV_COL_WIDTH)}${'Branch'.padStart(COV_COL_WIDTH)}${'Funcs'.padStart(COV_COL_WIDTH)}`;
+  const dur = `${'Duration'.padStart(DUR_SECTION_WIDTH)}`;
+  return c.dim(`${left} │ ${cov} │ ${dur}`);
+}
+
+/**
+ * Render separator with coverage section
+ * Left width = nameWidth + 2 (indent) + 5*6 (Files..Fail) = nameWidth + 32
+ */
+export function renderSeparatorWithCoverage(nameWidth) {
+  // Left: nameWidth + 5*6 cols + 1 trailing space before │ = nameWidth + 31
+  const leftWidth = nameWidth + 31;
+  // Coverage: space + 3*8 cols + space = 26
+  const covWidth = COV_SECTION_WIDTH + 2;
+  // Duration: space + 10 = 11
+  const durWidth = DUR_SECTION_WIDTH + 1;
+  return c.dim(`  ${'─'.repeat(leftWidth)}┼${'─'.repeat(covWidth)}┼${'─'.repeat(durWidth)}`);
+}
+
+/**
+ * Render interactive row with inline coverage
+ * Layout: marker name  files tests  pass  skip  fail │  lines  branch  funcs │ duration
+ */
+export function renderInteractiveRowWithCoverage(pkg, state, spinnerIdx, nameWidth, selected = false, cursorDimmed = false) {
+  const paddedName = pkg.name.padEnd(nameWidth - pkg.runner.length - 3);
+  const runnerSuffix = c.gray(`(${pkg.runner})`);
+
+  const marker = selected
+    ? (cursorDimmed ? c.gray('▶') : '▶')
+    : ' ';
+
+  const styledName = selected && !cursorDimmed
+    ? paddedName
+    : c.blue(paddedName);
+
+  const name = `${marker} ${styledName} ${runnerSuffix}`;
+  const sep = c.dim('│');
+
+  if (state.status === 'pending') {
+    const left = c.dim(`${marker} ${paddedName} ${runnerSuffix}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}`);
+    const cov = formatCoverageColumns(null, true).text;
+    const dur = c.dim(formatDuration(null));
+    return `${left} ${sep} ${cov} ${sep} ${dur}`;
+  }
+
+  if (state.status === 'running') {
+    const frame = spinnerFrames[spinnerIdx % spinnerFrames.length];
+    const { passStr, skipStr, failStr } = formatColoredColumns(state.passed, state.skipped, state.failed);
+    const left = `${name}${c.dim(`${formatNum(null)}${formatNum(null)}`)}${passStr}${skipStr}${failStr}`;
+    const cov = formatCoverageColumns(null, true).text;
+    const dur = c.dim(('  ' + frame).padStart(DUR_SECTION_WIDTH));
+    return `${left} ${sep} ${cov} ${sep} ${dur}`;
+  }
+
+  // Done
+  const { passStr, skipStr, failStr } = formatColoredColumns(state.passed, state.skipped, state.failed);
+  const left = `${name}${c.dim(`${formatNum(state.files)}${formatNum(state.tests)}`)}${passStr}${skipStr}${failStr}`;
+  const cov = formatCoverageColumns(state.coverage).text;
+  const dur = c.dim(formatDuration(state.duration));
+  return `${left} ${sep} ${cov} ${sep} ${dur}`;
+}
+
+/**
+ * Aggregate status: red if any red, yellow if any yellow, green if all green.
+ * @param {string[]} statuses - Array of 'red'|'yellow'|'green'|'none'
+ * @returns {'red'|'yellow'|'green'|'none'}
+ */
+function aggregateStatus(statuses) {
+  const real = statuses.filter(s => s !== 'none');
+  if (real.length === 0) return 'none';
+  if (real.includes('red')) return 'red';
+  if (real.includes('yellow')) return 'yellow';
+  return 'green';
+}
+
+/**
+ * Color a formatted percentage string according to an aggregate status.
+ */
+function colorByStatus(formatted, status) {
+  if (status === 'red') return c.red(formatted);
+  if (status === 'yellow') return c.yellow(formatted);
+  if (status === 'green') return c.dim(c.green(formatted));
+  return c.dim(formatted);
+}
+
+/**
+ * Render totals row with inline coverage.
+ * Total color per column: green if all packages green, yellow if any yellow, red if any red.
+ */
+export function renderTotalsWithCoverage(states, nameWidth) {
+  const totals = { files: 0, tests: 0, passed: 0, skipped: 0, failed: 0, duration: 0 };
+  let hasAnyDone = false;
+
+  const covTotals = {
+    linesSum: 0, linesCount: 0,
+    branchesSum: 0, branchesCount: 0,
+    functionsSum: 0, functionsCount: 0,
+  };
+
+  // Collect per-column statuses from all packages
+  const allLinesStatuses = [];
+  const allBranchesStatuses = [];
+  const allFunctionsStatuses = [];
+
+  for (const state of Object.values(states)) {
+    totals.passed += state.passed || 0;
+    totals.skipped += state.skipped || 0;
+    totals.failed += state.failed || 0;
+
+    if (state.status === 'done') {
+      hasAnyDone = true;
+      totals.files += state.files || 0;
+      totals.tests += state.tests || 0;
+      totals.duration += state.duration || 0;
+
+      if (state.coverage) {
+        // Get per-package statuses
+        const th = state.coverage.thresholds || {};
+        const ls = formatCoveragePct(state.coverage.lines, COV_COL_WIDTH, th.lines);
+        const bs = formatCoveragePct(state.coverage.branches, COV_COL_WIDTH, th.branches);
+        const fs = formatCoveragePct(state.coverage.functions, COV_COL_WIDTH, th.functions);
+        allLinesStatuses.push(ls.status);
+        allBranchesStatuses.push(bs.status);
+        allFunctionsStatuses.push(fs.status);
+
+        if (state.coverage.lines && state.coverage.lines !== '-') {
+          covTotals.linesSum += parseFloat(state.coverage.lines);
+          covTotals.linesCount++;
+        }
+        if (state.coverage.branches && state.coverage.branches !== '-') {
+          covTotals.branchesSum += parseFloat(state.coverage.branches);
+          covTotals.branchesCount++;
+        }
+        if (state.coverage.functions && state.coverage.functions !== '-') {
+          covTotals.functionsSum += parseFloat(state.coverage.functions);
+          covTotals.functionsCount++;
+        }
+      }
+    }
+  }
+
+  const filesStr = hasAnyDone ? formatNum(totals.files) : formatNum(null);
+  const testsStr = hasAnyDone ? formatNum(totals.tests) : formatNum(null);
+  const { passStr, skipStr, failStr } = formatColoredColumns(totals.passed, totals.skipped, totals.failed, true);
+
+  const left = `  ${c.bold('Total'.padEnd(nameWidth))}${filesStr}${testsStr}${passStr}${skipStr}${failStr}`;
+
+  let covText;
+  if (hasAnyDone) {
+    const avgLines = covTotals.linesCount ? (covTotals.linesSum / covTotals.linesCount).toFixed(1) : '-';
+    const avgBranches = covTotals.branchesCount ? (covTotals.branchesSum / covTotals.branchesCount).toFixed(1) : '-';
+    const avgFunctions = covTotals.functionsCount ? (covTotals.functionsSum / covTotals.functionsCount).toFixed(1) : '-';
+
+    const linesStatus = aggregateStatus(allLinesStatuses);
+    const branchesStatus = aggregateStatus(allBranchesStatuses);
+    const functionsStatus = aggregateStatus(allFunctionsStatuses);
+
+    const linesStr = avgLines === '-'
+      ? c.dim('-'.padStart(COV_COL_WIDTH))
+      : colorByStatus((avgLines + '%').padStart(COV_COL_WIDTH), linesStatus);
+    const branchStr = avgBranches === '-'
+      ? c.dim('-'.padStart(COV_COL_WIDTH))
+      : colorByStatus((avgBranches + '%').padStart(COV_COL_WIDTH), branchesStatus);
+    const funcsStr = avgFunctions === '-'
+      ? c.dim('-'.padStart(COV_COL_WIDTH))
+      : colorByStatus((avgFunctions + '%').padStart(COV_COL_WIDTH), functionsStatus);
+
+    covText = `${linesStr}${branchStr}${funcsStr}`;
+  } else {
+    covText = formatCoverageColumns(null, true).text;
+  }
+
+  const dur = hasAnyDone ? c.dim(formatDuration(totals.duration)) : c.dim(formatDuration(null));
+  const sep = c.dim('│');
+
+  return `${left} ${sep} ${covText} ${sep} ${dur}`;
+}
+
 /**
  * Render the help overlay
  */
@@ -191,7 +407,6 @@ export function renderHelp(lineWidth) {
     '',
     '  Modes',
     '    c         Toggle coverage',
-    '    v         Toggle verbose (per-file coverage)',
     '    w         Toggle watch mode',
     '',
     '  Other',
@@ -251,18 +466,39 @@ export function printSummary(failed) {
 // ============================================================================
 
 /**
- * Format coverage percentage with color
+ * Format coverage percentage with threshold-aware coloring.
+ *
+ * Color rules:
+ *   - Below threshold → red
+ *   - Exactly at threshold → yellow
+ *   - Above threshold → green dim
+ *   - No threshold set → yellow dim
+ *
  * @param {string} pct - Percentage string or '-'
  * @param {number} width - Column width (default 7)
- * @returns {string} - Colored percentage string
+ * @param {number|undefined} threshold - Threshold value from config, or undefined
+ * @returns {{ text: string, status: 'red'|'yellow'|'green'|'none' }}
  */
-export function formatCoveragePct(pct, width = 7) {
+export function formatCoveragePct(pct, width = 7, threshold = undefined) {
   if (pct === '-' || pct === null || pct === undefined) {
-    return c.dim('-'.padStart(width));
+    return { text: c.dim('-'.padStart(width)), status: 'none' };
   }
   const num = parseFloat(pct);
-  const color = num >= 80 ? c.green : num >= 60 ? c.yellow : c.red;
-  return color(`${(pct + '%').padStart(width)}`);
+  const formatted = (pct + '%').padStart(width);
+
+  if (threshold === undefined || threshold === null) {
+    // No threshold configured
+    return { text: c.dim(c.yellow(formatted)), status: 'yellow' };
+  }
+
+  if (num < threshold) {
+    return { text: c.red(formatted), status: 'red' };
+  }
+  if (num === threshold && num < 100) {
+    return { text: c.yellow(formatted), status: 'yellow' };
+  }
+  // Above threshold, or exactly at 100%
+  return { text: c.dim(c.green(formatted)), status: 'green' };
 }
 
 /**
@@ -288,33 +524,45 @@ export function renderCoverageHeader(nameWidth) {
 /**
  * Render a single coverage row
  * @param {string} pkgName - Package name
- * @param {object} coverageState - Coverage state object
+ * @param {object} coverageState - Coverage state object (with optional thresholds)
  * @param {number} nameWidth - Width for package name column
+ * @returns {{ text: string, statuses: string[] }}
  */
 export function renderCoverageRow(pkgName, coverageState, nameWidth) {
   const name = `  ${c.blue(pkgName.padEnd(nameWidth))}`;
   
   if (!coverageState || coverageState.status === 'pending') {
-    return c.dim(`  ${pkgName.padEnd(nameWidth)}${'-'.padStart(8)}${'-'.padStart(8)}${'-'.padStart(8)}`);
+    return {
+      text: c.dim(`  ${pkgName.padEnd(nameWidth)}${'-'.padStart(8)}${'-'.padStart(8)}${'-'.padStart(8)}`),
+      statuses: ['none', 'none', 'none'],
+    };
   }
   
   if (coverageState.status === 'loading') {
-    return `${name}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}`;
+    return {
+      text: `${name}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}${c.dim('...'.padStart(8))}`,
+      statuses: ['none', 'none', 'none'],
+    };
   }
   
-  const linesStr = formatCoveragePct(coverageState.lines, 8);
-  const branchStr = formatCoveragePct(coverageState.branches, 8);
-  const funcsStr = formatCoveragePct(coverageState.functions, 8);
+  const th = coverageState.thresholds || {};
+  const lines = formatCoveragePct(coverageState.lines, 8, th.lines);
+  const branch = formatCoveragePct(coverageState.branches, 8, th.branches);
+  const funcs = formatCoveragePct(coverageState.functions, 8, th.functions);
   
-  return `${name}${linesStr}${branchStr}${funcsStr}`;
+  return {
+    text: `${name}${lines.text}${branch.text}${funcs.text}`,
+    statuses: [lines.status, branch.status, funcs.status],
+  };
 }
 
 /**
- * Render coverage totals row
+ * Render coverage totals row with aggregate status coloring.
  * @param {object} coverageStates - Map of package name to coverage state
+ * @param {Array<string[]>} allRowStatuses - Array of per-row [lines, branches, functions] statuses
  * @param {number} nameWidth - Width for package name column
  */
-export function renderCoverageTotals(coverageStates, nameWidth) {
+export function renderCoverageTotals(coverageStates, allRowStatuses, nameWidth) {
   const totals = {
     linesHit: 0, linesTotal: 0,
     branchesHit: 0, branchesTotal: 0,
@@ -327,8 +575,6 @@ export function renderCoverageTotals(coverageStates, nameWidth) {
     if (!state || state.status !== 'done') continue;
     hasAny = true;
     
-    // We need raw values to calculate totals properly
-    // For now, we'll show weighted average based on available percentages
     if (state.lines && state.lines !== '-') {
       totals.linesHit += parseFloat(state.lines);
       totals.linesTotal += 1;
@@ -346,10 +592,21 @@ export function renderCoverageTotals(coverageStates, nameWidth) {
   const avgLines = totals.linesTotal ? (totals.linesHit / totals.linesTotal).toFixed(1) : '-';
   const avgBranches = totals.branchesTotal ? (totals.branchesHit / totals.branchesTotal).toFixed(1) : '-';
   const avgFunctions = totals.functionsTotal ? (totals.functionsHit / totals.functionsTotal).toFixed(1) : '-';
-  
-  const linesStr = hasAny ? formatCoveragePct(avgLines, 8) : c.dim('-'.padStart(8));
-  const branchStr = hasAny ? formatCoveragePct(avgBranches, 8) : c.dim('-'.padStart(8));
-  const funcsStr = hasAny ? formatCoveragePct(avgFunctions, 8) : c.dim('-'.padStart(8));
+
+  // Aggregate statuses across all rows per column
+  const linesStatus = aggregateStatus(allRowStatuses.map(s => s[0]));
+  const branchesStatus = aggregateStatus(allRowStatuses.map(s => s[1]));
+  const functionsStatus = aggregateStatus(allRowStatuses.map(s => s[2]));
+
+  const linesStr = hasAny && avgLines !== '-'
+    ? colorByStatus((avgLines + '%').padStart(8), linesStatus)
+    : c.dim('-'.padStart(8));
+  const branchStr = hasAny && avgBranches !== '-'
+    ? colorByStatus((avgBranches + '%').padStart(8), branchesStatus)
+    : c.dim('-'.padStart(8));
+  const funcsStr = hasAny && avgFunctions !== '-'
+    ? colorByStatus((avgFunctions + '%').padStart(8), functionsStatus)
+    : c.dim('-'.padStart(8));
   
   return `  ${c.bold('Total'.padEnd(nameWidth))}${linesStr}${branchStr}${funcsStr}`;
 }
@@ -367,12 +624,15 @@ export function printCoverageTable(packages, coverageStates, nameWidth) {
   console.log(renderCoverageHeader(nameWidth));
   console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
   
+  const allRowStatuses = [];
   for (const pkg of packages) {
-    console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
+    const row = renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth);
+    console.log(row.text);
+    allRowStatuses.push(row.statuses);
   }
   
   console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
-  console.log(renderCoverageTotals(coverageStates, nameWidth));
+  console.log(renderCoverageTotals(coverageStates, allRowStatuses, nameWidth));
 }
 
 /**
@@ -384,12 +644,13 @@ export function printVerboseCoverage(verboseData) {
   
   console.log(`\n${c.bold(c.cyan('Coverage Details'))}\n`);
   
-  for (const { name, relevantFiles, displayPaths, stats } of packageDisplayData) {
-    const linesStr = formatCoveragePct(stats.lines, 8);
-    const branchStr = formatCoveragePct(stats.branches, 8);
-    const funcsStr = formatCoveragePct(stats.functions, 8);
+  for (const { name, relevantFiles, displayPaths, stats, thresholds } of packageDisplayData) {
+    const th = thresholds || {};
+    const lines = formatCoveragePct(stats.lines, 8, th.lines);
+    const branch = formatCoveragePct(stats.branches, 8, th.branches);
+    const funcs = formatCoveragePct(stats.functions, 8, th.functions);
     
-    console.log(`${c.bold(name.padEnd(fileWidth + 2))}  ${linesStr}  ${branchStr}  ${funcsStr}`);
+    console.log(`${c.bold(name.padEnd(fileWidth + 2))}  ${lines.text}  ${branch.text}  ${funcs.text}`);
     console.log(c.dim('─'.repeat(fileWidth + 30)));
     
     for (let i = 0; i < relevantFiles.length; i++) {
@@ -399,8 +660,12 @@ export function printVerboseCoverage(verboseData) {
       const fBranches = f.branchesTotal ? ((f.branchesHit / f.branchesTotal) * 100).toFixed(1) : '-';
       const fFunctions = f.functionsTotal ? ((f.functionsHit / f.functionsTotal) * 100).toFixed(1) : '-';
       
+      const fl = formatCoveragePct(fLines, 8, th.lines);
+      const fb = formatCoveragePct(fBranches, 8, th.branches);
+      const ff = formatCoveragePct(fFunctions, 8, th.functions);
+      
       console.log(
-        `  ${c.dim(relPath.padEnd(fileWidth))}  ${formatCoveragePct(fLines, 8)}  ${formatCoveragePct(fBranches, 8)}  ${formatCoveragePct(fFunctions, 8)}`
+        `  ${c.dim(relPath.padEnd(fileWidth))}  ${fl.text}  ${fb.text}  ${ff.text}`
       );
     }
     console.log();

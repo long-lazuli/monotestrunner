@@ -10,16 +10,15 @@ import {
   term,
   spinner,
   createInitialState,
-  createInitialCoverageState,
   renderInteractiveRow,
   renderTotals,
   renderHelp,
-  renderCoverageHeader,
-  renderCoverageRow,
-  renderCoverageTotals,
-  formatCoveragePct,
+  renderInteractiveHeaderWithCoverage,
+  renderInteractiveRowWithCoverage,
+  renderSeparatorWithCoverage,
+  renderTotalsWithCoverage,
 } from './ui.js';
-import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
+import { getPackageCoverage } from './coverage.js';
 import { createWatcherManager } from './watcher.js';
 import {
   parseVitestFinal,
@@ -165,7 +164,6 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     currentCommand: '',
     watchEnabled: initialWatchEnabled,
     coverageEnabled: initialCoverageEnabled,
-    verboseEnabled: false,
     cursorDimmed: false,
   };
   
@@ -208,107 +206,48 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       return;
     }
 
+    const cov = uiState.coverageEnabled;
+
     // Move to top and clear
     process.stdout.write(term.moveTo(1, 1));
 
     // Header
     const modeLabel = uiState.watchEnabled
-      ? `(${c.yellow('watching')})` 
+      ? `(${c.yellow('watching')})`
       : '(interactive)';
+    const title = cov ? 'Test & Coverage Summary' : 'Test Summary';
     process.stdout.write(term.clearLine);
-    console.log(`${c.bold(c.cyan('Test Summary'))} ${c.dim(modeLabel)}\n`);
-    console.log(c.dim(`  ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}${'Duration'.padStart(10)}`));
-    console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
+    console.log(`${c.bold(c.cyan(title))} ${c.dim(modeLabel)}\n`);
+
+    if (cov) {
+      console.log(renderInteractiveHeaderWithCoverage(nameWidth));
+      console.log(renderSeparatorWithCoverage(nameWidth));
+    } else {
+      console.log(c.dim(`  ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}${'Duration'.padStart(10)}`));
+      console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
+    }
 
     // Package rows
     for (let i = 0; i < packages.length; i++) {
       const pkg = packages[i];
       const selected = i === uiState.selectedIndex;
       process.stdout.write(term.clearLine);
-      console.log(renderInteractiveRow(pkg, states[pkg.name], spinnerIdx, nameWidth, selected, uiState.cursorDimmed));
+      if (cov) {
+        console.log(renderInteractiveRowWithCoverage(pkg, states[pkg.name], spinnerIdx, nameWidth, selected, uiState.cursorDimmed));
+      } else {
+        console.log(renderInteractiveRow(pkg, states[pkg.name], spinnerIdx, nameWidth, selected, uiState.cursorDimmed));
+      }
     }
 
     // Separator and totals
-    console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
-    process.stdout.write(term.clearLine);
-    console.log(renderTotals(states, nameWidth));
-
-    // Coverage section (if enabled)
-    if (uiState.coverageEnabled) {
-      const covLineWidth = nameWidth + 2 + 8 + 8 + 8;
-
-      // Build coverageStates from states
-      const coverageStates = {};
-      for (const pkg of packages) {
-        const state = states[pkg.name];
-        if (state.coverage) {
-          coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
-        } else if (state.status === 'done') {
-          coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
-        } else {
-          coverageStates[pkg.name] = createInitialCoverageState();
-        }
-      }
-
+    if (cov) {
+      console.log(renderSeparatorWithCoverage(nameWidth));
       process.stdout.write(term.clearLine);
-      console.log();  // blank line
+      console.log(renderTotalsWithCoverage(states, nameWidth));
+    } else {
+      console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
       process.stdout.write(term.clearLine);
-      const verboseLabel = uiState.verboseEnabled ? ` ${c.dim('(verbose)')}` : '';
-      console.log(`${c.bold(c.cyan('Coverage Summary'))}${verboseLabel}`);
-      process.stdout.write(term.clearLine);
-      console.log();  // blank line after title
-
-      if (uiState.verboseEnabled) {
-        // Verbose mode: show per-file coverage
-        const pkgsWithPaths = packages.map(pkg => ({
-          name: pkg.name,
-          dir: pkg.dir,
-          path: pkg.path,
-        }));
-        const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
-        
-        for (const { name, relevantFiles, displayPaths, stats } of verboseData.packageDisplayData) {
-          process.stdout.write(term.clearLine);
-          const linesStr = formatCoveragePct(stats.lines, 8);
-          const branchStr = formatCoveragePct(stats.branches, 8);
-          const funcsStr = formatCoveragePct(stats.functions, 8);
-          console.log(`${c.bold(c.blue(name.padEnd(verboseData.fileWidth + 2)))}  ${linesStr}  ${branchStr}  ${funcsStr}`);
-          
-          process.stdout.write(term.clearLine);
-          console.log(c.dim('─'.repeat(verboseData.fileWidth + 30)));
-          
-          for (let i = 0; i < relevantFiles.length; i++) {
-            const f = relevantFiles[i];
-            const relPath = displayPaths[i];
-            const fLines = f.linesTotal ? ((f.linesHit / f.linesTotal) * 100).toFixed(1) : '-';
-            const fBranches = f.branchesTotal ? ((f.branchesHit / f.branchesTotal) * 100).toFixed(1) : '-';
-            const fFunctions = f.functionsTotal ? ((f.functionsHit / f.functionsTotal) * 100).toFixed(1) : '-';
-            
-            process.stdout.write(term.clearLine);
-            console.log(
-              `  ${c.dim(relPath.padEnd(verboseData.fileWidth))}  ${formatCoveragePct(fLines, 8)}  ${formatCoveragePct(fBranches, 8)}  ${formatCoveragePct(fFunctions, 8)}`
-            );
-          }
-          process.stdout.write(term.clearLine);
-          console.log();
-        }
-      } else {
-        // Normal mode: show package-level coverage
-        process.stdout.write(term.clearLine);
-        console.log(renderCoverageHeader(nameWidth));
-        process.stdout.write(term.clearLine);
-        console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-
-        for (const pkg of packages) {
-          process.stdout.write(term.clearLine);
-          console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
-        }
-
-        process.stdout.write(term.clearLine);
-        console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-        process.stdout.write(term.clearLine);
-        console.log(renderCoverageTotals(coverageStates, nameWidth));
-      }
+      console.log(renderTotals(states, nameWidth));
     }
 
     // Status lines
@@ -316,7 +255,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     process.stdout.write(term.clearLine);
     console.log(c.dim(uiState.currentCommand || ' '));
     process.stdout.write(term.clearLine);
-    console.log(c.dim('↑↓ navigate  r:rerun  a:rerun all  c:coverage  v:verbose  w:watch  h:help  q:quit'));
+    console.log(c.dim('↑↓ navigate  r:rerun  a:rerun all  c:coverage  w:watch  h:help  q:quit'));
   };
 
   const onUpdate = () => {
@@ -540,25 +479,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
           process.stdout.write(term.clearScreen);
           runAll();
         } else {
-          uiState.verboseEnabled = false;  // Also disable verbose when disabling coverage
           uiState.currentCommand = 'Coverage disabled';
           // Clear screen since we're removing coverage section
           process.stdout.write(term.clearScreen);
-          redraw();
-        }
-        return;
-      }
-
-      // Toggle verbose mode (only when coverage is enabled)
-      if (str === 'v') {
-        if (uiState.coverageEnabled) {
-          uiState.verboseEnabled = !uiState.verboseEnabled;
-          uiState.currentCommand = uiState.verboseEnabled ? 'Verbose coverage enabled' : 'Verbose coverage disabled';
-          // Clear screen to adjust for different content size
-          process.stdout.write(term.clearScreen);
-          redraw();
-        } else {
-          uiState.currentCommand = 'Enable coverage first (c) to use verbose mode';
           redraw();
         }
         return;

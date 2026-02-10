@@ -105,27 +105,34 @@ export function readCoverageSummary(summaryPath) {
 }
 
 /**
- * Get coverage stats for a single package
- * @param {object} pkg - Package object with path property
- * @returns {object|null} - Stats object or null if no coverage data
+ * Get coverage stats for a single package, including thresholds.
+ * @param {object} pkg - Package object with path and runner properties
+ * @returns {object|null} - { lines, branches, functions, thresholds? } or null
  */
 export function getPackageCoverage(pkg) {
   const summaryPath = join(pkg.path, 'coverage', 'coverage-summary.json');
   const lcovPath = join(pkg.path, 'coverage', 'lcov.info');
 
   // Try coverage-summary.json first (fast path)
-  const stats = readCoverageSummary(summaryPath);
-  if (stats) {
-    return stats;
-  }
+  let stats = readCoverageSummary(summaryPath);
 
   // Fallback: parse lcov.info
-  const files = parseLcovDetailed(lcovPath);
-  if (files && files.length > 0) {
-    return aggregateStats(files);
+  if (!stats) {
+    const files = parseLcovDetailed(lcovPath);
+    if (files && files.length > 0) {
+      stats = aggregateStats(files);
+    }
   }
 
-  return null;
+  if (!stats) return null;
+
+  // Attach thresholds from config
+  const thresholds = getPackageThresholds(pkg);
+  if (thresholds) {
+    stats.thresholds = thresholds;
+  }
+
+  return stats;
 }
 
 /**
@@ -164,6 +171,87 @@ export function getDisplayPath(filePath, pkgRoot) {
   }
 
   return relPath;
+}
+
+// ============================================================================
+// Threshold Parsing
+// ============================================================================
+
+/**
+ * Parse coverage thresholds from a vitest config file (TypeScript or JavaScript).
+ * Extracts thresholds: { lines, branches, functions } from the `thresholds` block
+ * inside test.coverage.
+ * @param {string} configPath - Path to vitest.config.ts or vitest.config.js
+ * @returns {object|null} - { lines, branches, functions } or null if no thresholds
+ */
+export function parseVitestThresholds(configPath) {
+  if (!existsSync(configPath)) return null;
+
+  const content = readFileSync(configPath, 'utf-8');
+
+  // Match the thresholds block: thresholds: { ... }
+  const thresholdsMatch = content.match(/thresholds\s*:\s*\{([^}]+)\}/);
+  if (!thresholdsMatch) return null;
+
+  const block = thresholdsMatch[1];
+  const result = {};
+
+  for (const key of ['lines', 'branches', 'functions']) {
+    const m = block.match(new RegExp(`${key}\\s*:\\s*([\\d.]+)`));
+    if (m) result[key] = parseFloat(m[1]);
+  }
+
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+/**
+ * Parse coverage thresholds from bunfig.toml.
+ * Bun uses coverageThreshold with line/function/statement keys under [test].
+ * @param {string} configPath - Path to bunfig.toml
+ * @returns {object|null} - { lines, branches, functions } or null if no thresholds
+ */
+export function parseBunThresholds(configPath) {
+  if (!existsSync(configPath)) return null;
+
+  const content = readFileSync(configPath, 'utf-8');
+
+  // Bun uses coverageThreshold = { line = N, function = N, statement = N }
+  // or [test.coverageThreshold] section
+  const thresholdMatch = content.match(/coverageThreshold\s*=\s*\{([^}]+)\}/);
+  if (!thresholdMatch) return null;
+
+  const block = thresholdMatch[1];
+  const result = {};
+
+  // Bun uses singular: line, function, statement (no branches)
+  const lineMatch = block.match(/line\s*=\s*([\d.]+)/);
+  if (lineMatch) result.lines = parseFloat(lineMatch[1]);
+
+  const funcMatch = block.match(/function\s*=\s*([\d.]+)/);
+  if (funcMatch) result.functions = parseFloat(funcMatch[1]);
+
+  // Bun doesn't have a branches threshold natively
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+/**
+ * Get coverage thresholds for a package by reading its config file.
+ * @param {object} pkg - Package object with path and runner properties
+ * @returns {object|null} - { lines?, branches?, functions? } or null
+ */
+export function getPackageThresholds(pkg) {
+  if (pkg.runner === 'vitest') {
+    // Try vitest.config.ts, then vitest.config.js, then vite.config.ts
+    for (const name of ['vitest.config.ts', 'vitest.config.js', 'vite.config.ts', 'vite.config.js']) {
+      const result = parseVitestThresholds(join(pkg.path, name));
+      if (result) return result;
+    }
+  } else {
+    // Bun: try bunfig.toml
+    const result = parseBunThresholds(join(pkg.path, 'bunfig.toml'));
+    if (result) return result;
+  }
+  return null;
 }
 
 // ============================================================================
@@ -219,6 +307,7 @@ export function getVerboseCoverageData(rootDir, packages) {
       name: pkg.name,
       dir: pkg.dir,
       path: pkg.path,
+      runner: pkg.runner,
       lcovPath: pkg.lcovPath || join(pkg.path, 'coverage', 'lcov.info'),
       files: parseLcovDetailed(pkg.lcovPath || join(pkg.path, 'coverage', 'lcov.info')) || [],
     }))
@@ -234,12 +323,14 @@ export function getVerboseCoverageData(rootDir, packages) {
     const pkgRoot = join(rootDir, pkg.dir, pkg.name);
     const displayPaths = relevantFiles.map(f => getDisplayPath(f.file, pkgRoot));
     allDisplayPaths.push(...displayPaths);
+    const thresholds = getPackageThresholds(pkg);
     packageDisplayData.push({
       name: pkg.name,
       relevantFiles,
       displayPaths,
       pkgRoot,
       stats: aggregateStats(relevantFiles),
+      thresholds,
     });
   }
 

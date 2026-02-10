@@ -29,7 +29,7 @@ import {
   countVitestDots,
   countBunDots,
 } from './parsers.js';
-import { loadConfig, validateConfig, detectPackageManager, getPackageRunCommand } from './config.js';
+import { loadConfig, validateConfig } from './config.js';
 import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
 import {
   printCoverageTable,
@@ -241,15 +241,18 @@ function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLi
     process.stdout.write('\r' + term.clearLine);
     console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
 
+    const allRowStatuses = [];
     for (const pkg of packages) {
       process.stdout.write('\r' + term.clearLine);
-      console.log(renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth));
+      const row = renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth);
+      console.log(row.text);
+      allRowStatuses.push(row.statuses);
     }
 
     process.stdout.write('\r' + term.clearLine);
     console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
     process.stdout.write('\r' + term.clearLine);
-    console.log(renderCoverageTotals(coverageStates, nameWidth));
+    console.log(renderCoverageTotals(coverageStates, allRowStatuses, nameWidth));
   }
 }
 
@@ -283,11 +286,14 @@ async function runTTY(packages, coverageEnabled = false) {
     console.log();  // blank line after title
     console.log(renderCoverageHeader(nameWidth));
     console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+    const initRowStatuses = [];
     for (const pkg of packages) {
-      console.log(renderCoverageRow(pkg.name, createInitialCoverageState(), nameWidth));
+      const row = renderCoverageRow(pkg.name, createInitialCoverageState(), nameWidth);
+      console.log(row.text);
+      initRowStatuses.push(row.statuses);
     }
     console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-    console.log(renderCoverageTotals({}, nameWidth));
+    console.log(renderCoverageTotals({}, initRowStatuses, nameWidth));
   }
 
   process.stdout.write(term.hideCursor);
@@ -341,12 +347,13 @@ async function runTTY(packages, coverageEnabled = false) {
     }
   }
 
-  // Verbose coverage output
+  // Verbose coverage: show per-file details after the run
   if (coverageEnabled && verbose) {
     const pkgsWithPaths = packages.map(pkg => ({
       name: pkg.name,
       dir: pkg.dir,
       path: pkg.path,
+      runner: pkg.runner,
     }));
     const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
     if (verboseData.packageDisplayData.length > 0) {
@@ -398,30 +405,32 @@ async function runCI(packages, coverageEnabled = false) {
     }
   }
 
-  // Coverage table (CI mode - printed after all tests complete)
+   // Coverage output (CI mode - printed after all tests complete)
   if (coverageEnabled) {
-    const coverageStates = {};
-    for (const pkg of packages) {
-      const state = states[pkg.name];
-      if (state.coverage) {
-        coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
-      } else {
-        coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
-      }
-    }
-    printCoverageTable(packages, coverageStates, nameWidth);
-
-    // Verbose coverage output
     if (verbose) {
+      // Verbose: show per-file coverage details
       const pkgsWithPaths = packages.map(pkg => ({
         name: pkg.name,
         dir: pkg.dir,
         path: pkg.path,
+        runner: pkg.runner,
       }));
       const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
       if (verboseData.packageDisplayData.length > 0) {
         printVerboseCoverage(verboseData);
       }
+    } else {
+      // Summary: show package-level coverage table
+      const coverageStates = {};
+      for (const pkg of packages) {
+        const state = states[pkg.name];
+        if (state.coverage) {
+          coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
+        } else {
+          coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
+        }
+      }
+      printCoverageTable(packages, coverageStates, nameWidth);
     }
   }
 
