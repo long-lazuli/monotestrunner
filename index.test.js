@@ -428,23 +428,23 @@ const testRootDir = join(__testDirname, '../..');
 describe('watcher', () => {
   describe('getAffectedPackage', () => {
     const packages = [
-      { name: 'lass-cli', path: '/workspace/packages/lass-cli' },
-      { name: 'lass-core', path: '/workspace/packages/lass-core' },
-      { name: 'vite-plugin-lass', path: '/workspace/plugins/vite-plugin-lass' },
+      { name: 'pkg-cli', path: '/workspace/packages/pkg-cli' },
+      { name: 'pkg-core', path: '/workspace/packages/pkg-core' },
+      { name: 'vite-plugin-foo', path: '/workspace/plugins/vite-plugin-foo' },
     ];
 
     it('should match file to package', () => {
-      const result = getAffectedPackage('/workspace/packages/lass-cli/src/index.ts', packages);
+      const result = getAffectedPackage('/workspace/packages/pkg-cli/src/index.ts', packages);
       expect(result).toEqual(packages[0]);
     });
 
     it('should match nested file to package', () => {
-      const result = getAffectedPackage('/workspace/packages/lass-core/src/parser/lexer.ts', packages);
+      const result = getAffectedPackage('/workspace/packages/pkg-core/src/parser/lexer.ts', packages);
       expect(result).toEqual(packages[1]);
     });
 
     it('should match plugin file to package', () => {
-      const result = getAffectedPackage('/workspace/plugins/vite-plugin-lass/test/plugin.test.ts', packages);
+      const result = getAffectedPackage('/workspace/plugins/vite-plugin-foo/test/plugin.test.ts', packages);
       expect(result).toEqual(packages[2]);
     });
 
@@ -454,8 +454,8 @@ describe('watcher', () => {
     });
 
     it('should return null for partial path match', () => {
-      // Shouldn't match 'lass-cli-extra' when looking for 'lass-cli'
-      const result = getAffectedPackage('/workspace/packages/lass-cli-extra/src/index.ts', packages);
+      // Shouldn't match 'pkg-cli-extra' when looking for 'pkg-cli'
+      const result = getAffectedPackage('/workspace/packages/pkg-cli-extra/src/index.ts', packages);
       expect(result).toBeNull();
     });
   });
@@ -463,14 +463,13 @@ describe('watcher', () => {
   describe('buildWatchPaths', () => {
     it('should build paths from packages', () => {
       const packages = [
-        { name: 'lass-cli', path: join(testRootDir, 'packages/lass-cli') },
+        { name: 'monotestrunner', path: join(testRootDir, 'scripts/monotestrunner') },
       ];
       
       const paths = buildWatchPaths(packages);
       
-      // Should include src and test directories that exist
-      expect(paths.some(p => p.includes('lass-cli/src'))).toBe(true);
-      expect(paths.some(p => p.includes('lass-cli/test'))).toBe(true);
+      // Should include src directory that exists
+      expect(paths.some(p => p.includes('monotestrunner/src'))).toBe(true);
     });
 
     it('should skip non-existent directories', () => {
@@ -498,15 +497,15 @@ describe('config', () => {
     const watchMappings = [
       {
         paths: ['apps/docs/content/axioms/**/*.md'],
-        triggers: ['lass-core'],
+        triggers: ['pkg-core'],
       },
       {
         paths: ['shared/schemas/**/*.json'],
         triggers: '*',
       },
       {
-        paths: ['packages/lass-core/fixtures/**/*'],
-        triggers: ['lass-core', 'lass-cli'],
+        paths: ['packages/pkg-core/fixtures/**/*'],
+        triggers: ['pkg-core', 'pkg-cli'],
       },
     ];
 
@@ -516,7 +515,7 @@ describe('config', () => {
         watchMappings,
         rootDir
       );
-      expect(result).toEqual(['lass-core']);
+      expect(result).toEqual(['pkg-core']);
     });
 
     it('should return "*" for wildcard triggers', () => {
@@ -530,11 +529,11 @@ describe('config', () => {
 
     it('should return multiple packages when specified', () => {
       const result = getTriggeredPackages(
-        '/workspace/packages/lass-core/fixtures/test.lass',
+        '/workspace/packages/pkg-core/fixtures/test.txt',
         watchMappings,
         rootDir
       );
-      expect(result).toEqual(['lass-core', 'lass-cli']);
+      expect(result).toEqual(['pkg-core', 'pkg-cli']);
     });
 
     it('should return null for unmatched file', () => {
@@ -557,7 +556,7 @@ describe('config', () => {
         watchMappings,
         '/workspace'
       );
-      expect(result).toEqual(['lass-core']);
+      expect(result).toEqual(['pkg-core']);
     });
   });
 
@@ -1387,10 +1386,10 @@ catalog:
   it('should handle explicit paths (no wildcards)', () => {
     const content = `packages:
   - packages/*
-  - plugins/vite-plugin-lass/test-app
+  - plugins/my-plugin/test-app
 `;
     const globs = parsePnpmWorkspaceYaml(content);
-    expect(globs).toEqual(['packages/*', 'plugins/vite-plugin-lass/test-app']);
+    expect(globs).toEqual(['packages/*', 'plugins/my-plugin/test-app']);
   });
 
   it('should return empty array for content without packages key', () => {

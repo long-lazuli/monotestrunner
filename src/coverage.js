@@ -172,7 +172,7 @@ export function getDisplayPath(filePath, pkgRoot) {
   if (relPath.startsWith('..')) {
     const pkgMatch = filePath.match(/packages\/([^/]+)\/dist\/(.+)$/);
     if (pkgMatch) {
-      return `@lass-lang/${pkgMatch[1]}/${pkgMatch[2]}`;
+      return `${pkgMatch[1]}/${pkgMatch[2]}`;
     }
     const srcMatch = filePath.match(/\/src\/(.+)$/);
     if (srcMatch) {

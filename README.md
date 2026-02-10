@@ -71,7 +71,7 @@ Config via `.monotestrunnerrc.json` (or any [lilconfig](https://github.com/anton
     },
     {
       "paths": ["shared/schemas/**/*.json"],
-      "triggers": ["lass-core", "lass-cli"]
+      "triggers": ["my-core", "my-cli"]
     }
   ]
 }
