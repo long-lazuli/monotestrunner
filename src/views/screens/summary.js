@@ -95,11 +95,12 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
  */
 function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDimmed, covEnabled) {
   const runnerLabel = pkg.runner || '';
-  const paddedName = pkg.name.padEnd(nameWidth - runnerLabel.length - (runnerLabel ? 3 : 0));
-  const runnerSuffix = runnerLabel ? c.gray(`(${runnerLabel})`) : '';
+  const runnerSuffix = runnerLabel ? ` ${c.gray(`(${runnerLabel})`)}` : '';
+  const namePadWidth = runnerLabel ? nameWidth - runnerLabel.length - 3 : nameWidth;
+  const paddedName = pkg.name.padEnd(namePadWidth);
   const marker = selected ? `  ${cursorDimmed ? c.gray('▶') : '▶'}` : '   ';
   const styledName = selected && !cursorDimmed ? paddedName : c.blue(paddedName);
-  const name = `${marker} ${styledName} ${runnerSuffix}`;
+  const name = `${marker} ${styledName}${runnerSuffix}`;
   const sep = c.dim('│');
 
   // No test script — dim row with centered message
@@ -109,7 +110,8 @@ function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDim
     const colSpan = 30;
     const padLeft = Math.floor((colSpan - label.length) / 2);
     const padRight = colSpan - label.length - padLeft;
-    const left = c.dim(`    ${paddedName} ${runnerSuffix}${' '.repeat(padLeft)}${label}${' '.repeat(padRight)}`);
+    const noTestCols = `${' '.repeat(padLeft)}${label}${' '.repeat(padRight)}`;
+    const left = c.dim(`${marker} ${paddedName}${runnerSuffix}${noTestCols}`);
     const cov = formatOffCov();
     const dur = c.dim(formatDuration(null));
     return `${left} ${sep} ${cov} ${sep} ${dur}`;
@@ -117,7 +119,7 @@ function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDim
 
   if (state.status === 'pending') {
     const left = c.dim(
-      `${marker} ${paddedName} ${runnerSuffix}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}`,
+      `${marker} ${paddedName}${runnerSuffix}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}${formatNum(null)}`,
     );
     const cov = covEnabled ? formatPendingCov() : formatOffCov();
     const dur = c.dim(formatDuration(null));
