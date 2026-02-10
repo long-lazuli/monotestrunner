@@ -17,15 +17,15 @@ import {
   renderInteractiveRowWithCoverage,
   renderSeparatorWithCoverage,
   renderTotalsWithCoverage,
-} from './ui.js';
-import { getPackageCoverage } from './coverage.js';
-import { createWatcherManager } from './watcher.js';
+} from '../ui.js';
+import { getPackageCoverage } from '../coverage.js';
+import { createWatcherManager } from '../watcher.js';
 import {
   parseVitestFinal,
   parseBunFinal,
   countVitestDots,
   countBunDots,
-} from './parsers.js';
+} from '../parsers.js';
 
 /**
  * Run tests for a single package with streaming
