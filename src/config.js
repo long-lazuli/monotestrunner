@@ -16,7 +16,7 @@ const MODULE_NAME = 'monotestrunner';
  * @returns {Promise<object>} - Config object (empty if no config found)
  */
 export async function loadConfig(rootDir) {
-  const explorer = lilconfig(MODULE_NAME);
+  const explorer = lilconfig(MODULE_NAME, { stopDir: rootDir });
   try {
     const result = await explorer.search(rootDir);
     return result?.config ?? {};
