@@ -1145,14 +1145,17 @@ describe('vitest runner adapter', () => {
       expect(args).toContain('--reporter=junit');
     });
 
-    it('should include --coverage when coverage enabled', () => {
+    it('should include --coverage and reporter flags when coverage enabled', () => {
       const { args } = vitestRunner.buildCommand({ coverage: true });
       expect(args).toContain('--coverage');
+      expect(args).toContain('--coverage.reporter=json-summary');
+      expect(args).toContain('--coverage.reporter=lcov');
     });
 
     it('should not include --coverage by default', () => {
       const { args } = vitestRunner.buildCommand();
       expect(args).not.toContain('--coverage');
+      expect(args).not.toContain('--coverage.reporter=json-summary');
     });
   });
 

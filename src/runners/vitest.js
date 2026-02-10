@@ -30,7 +30,7 @@ export function detect(testScript) {
 export function buildCommand({ coverage = false } = {}) {
   const args = ['vitest', 'run', '--reporter=dot', '--reporter=junit', '--outputFile.junit=coverage/junit.xml'];
   if (coverage) {
-    args.push('--coverage');
+    args.push('--coverage', '--coverage.reporter=json-summary', '--coverage.reporter=lcov');
   }
   return { command: 'pnpm', args };
 }
