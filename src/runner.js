@@ -13,20 +13,21 @@ import {
   printHeader,
   printSeparator,
   printSummary,
-  printCoverageTable,
   printVerboseCoverage,
-  createInitialCoverageState,
-  renderCoverageHeader,
-  renderCoverageRow,
-  renderCoverageTotals,
+  renderInteractiveRowWithCoverage,
+  renderInteractiveHeaderWithCoverage,
+  renderSeparatorWithCoverage,
+  renderTotalsWithCoverage,
 } from './ui.js';
 import {
   parseVitestFinal,
   parseBunFinal,
   countVitestDots,
   countBunDots,
+  parseJunitFile,
 } from './parsers.js';
 import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
+import { join } from 'node:path';
 
 /**
  * Run tests for a package with streaming dot output
@@ -38,15 +39,17 @@ import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
 export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = false) {
   return new Promise((resolve) => {
     let command, args;
+    const junitPath = join(pkg.path, 'coverage', 'junit.xml');
+
     if (pkg.runner === 'vitest') {
       command = 'pnpm';
-      args = ['vitest', 'run', '--reporter=dot'];
+      args = ['vitest', 'run', '--reporter=dot', '--reporter=junit', '--outputFile.junit=coverage/junit.xml'];
       if (coverageEnabled) {
         args.push('--coverage');
       }
     } else {
       command = 'bun';
-      args = ['test', '--dots'];
+      args = ['test', '--dots', '--reporter=junit', '--reporter-outfile=coverage/junit.xml'];
       if (coverageEnabled) {
         args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
       }
@@ -91,6 +94,9 @@ export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = fa
       state.duration = final.duration;
       state.output = output;
 
+      // Parse JUnit results for detail view
+      state.testResults = parseJunitFile(junitPath);
+
       // Get coverage data if coverage is enabled
       if (coverageEnabled) {
         state.coverage = getPackageCoverage(pkg);
@@ -104,60 +110,30 @@ export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = fa
 
 /**
  * Redraw all rows (TTY mode)
+ * @param {boolean} inlineCoverage - Whether to use the inline coverage table format
  */
-function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, coverageEnabled = false) {
+function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, inlineCoverage = false) {
   process.stdout.write(term.moveUp(totalLines));
 
-  for (const pkg of packages) {
-    process.stdout.write('\r' + term.clearLine);
-    console.log(renderRow(pkg, states[pkg.name], spinnerIdx, nameWidth));
-  }
-
-  process.stdout.write('\r' + term.clearLine);
-  console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
-  process.stdout.write('\r' + term.clearLine);
-  console.log(renderTotals(states, nameWidth));
-
-  // Coverage section
-  if (coverageEnabled) {
-    const covLineWidth = nameWidth + 2 + 7 + 8 + 8;
-
-    // Build coverageStates from states
-    const coverageStates = {};
-    for (const pkg of packages) {
-      const state = states[pkg.name];
-      if (state.coverage) {
-        coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
-      } else if (state.status === 'done') {
-        coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
-      } else {
-        coverageStates[pkg.name] = createInitialCoverageState();
-      }
-    }
-
-    process.stdout.write('\r' + term.clearLine);
-    console.log();  // blank line
-    process.stdout.write('\r' + term.clearLine);
-    console.log(`${c.bold(c.cyan('Coverage Summary'))}`);  // title (no extra newline)
-    process.stdout.write('\r' + term.clearLine);
-    console.log();  // blank line after title
-    process.stdout.write('\r' + term.clearLine);
-    console.log(renderCoverageHeader(nameWidth));
-    process.stdout.write('\r' + term.clearLine);
-    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-
-    const allRowStatuses = [];
+  if (inlineCoverage) {
+    // Inline coverage table (same format as interactive summary)
     for (const pkg of packages) {
       process.stdout.write('\r' + term.clearLine);
-      const row = renderCoverageRow(pkg.name, coverageStates[pkg.name], nameWidth);
-      console.log(row.text);
-      allRowStatuses.push(row.statuses);
+      console.log(renderInteractiveRowWithCoverage(pkg, states[pkg.name], spinnerIdx, nameWidth));
     }
-
     process.stdout.write('\r' + term.clearLine);
-    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
+    console.log(renderSeparatorWithCoverage(nameWidth));
     process.stdout.write('\r' + term.clearLine);
-    console.log(renderCoverageTotals(coverageStates, allRowStatuses, nameWidth));
+    console.log(renderTotalsWithCoverage(states, nameWidth));
+  } else {
+    for (const pkg of packages) {
+      process.stdout.write('\r' + term.clearLine);
+      console.log(renderRow(pkg, states[pkg.name], spinnerIdx, nameWidth));
+    }
+    process.stdout.write('\r' + term.clearLine);
+    console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
+    process.stdout.write('\r' + term.clearLine);
+    console.log(renderTotals(states, nameWidth));
   }
 }
 
@@ -169,36 +145,31 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
   const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
 
+  // Inline coverage columns only when coverage is on AND not verbose
+  // (verbose gets a plain test table + detailed per-file coverage after)
+  const inlineCoverage = coverageEnabled && !verbose;
+
   const states = {};
   for (const pkg of packages) {
     states[pkg.name] = createInitialState();
   }
 
-  printHeader(nameWidth, lineWidth);
-
-  for (const pkg of packages) {
-    console.log(renderRow(pkg, states[pkg.name], 0, nameWidth));
-  }
-
-  printSeparator(lineWidth);
-  console.log(renderTotals(states, nameWidth));
-
-  // Initial coverage section (if enabled)
-  if (coverageEnabled) {
-    const covLineWidth = nameWidth + 2 + 7 + 8 + 8;
-    console.log();  // blank line
-    console.log(`${c.bold(c.cyan('Coverage Summary'))}`);  // title
-    console.log();  // blank line after title
-    console.log(renderCoverageHeader(nameWidth));
-    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-    const initRowStatuses = [];
+  if (inlineCoverage) {
+    console.log(`\n${c.bold(c.cyan('Test & Coverage Summary'))}\n`);
+    console.log(renderInteractiveHeaderWithCoverage(nameWidth));
+    console.log(renderSeparatorWithCoverage(nameWidth));
     for (const pkg of packages) {
-      const row = renderCoverageRow(pkg.name, createInitialCoverageState(), nameWidth);
-      console.log(row.text);
-      initRowStatuses.push(row.statuses);
+      console.log(renderInteractiveRowWithCoverage(pkg, states[pkg.name], 0, nameWidth));
     }
-    console.log(`  ${c.dim('─'.repeat(covLineWidth - 2))}`);
-    console.log(renderCoverageTotals({}, initRowStatuses, nameWidth));
+    console.log(renderSeparatorWithCoverage(nameWidth));
+    console.log(renderTotalsWithCoverage(states, nameWidth));
+  } else {
+    printHeader(nameWidth, lineWidth);
+    for (const pkg of packages) {
+      console.log(renderRow(pkg, states[pkg.name], 0, nameWidth));
+    }
+    printSeparator(lineWidth);
+    console.log(renderTotals(states, nameWidth));
   }
 
   process.stdout.write(term.hideCursor);
@@ -209,16 +180,13 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
   process.on('exit', cleanup);
   process.on('SIGINT', () => { cleanup(); process.exit(1); });
 
-  // Total lines includes: packages + separator + totals row
-  // Plus coverage section if enabled: blank + title + blank + header + separator + packages + separator + totals
-  const testTableLines = packages.length + 2;
-  const coverageTableLines = coverageEnabled ? (1 + 1 + 1 + 1 + 1 + packages.length + 1 + 1) : 0;
-  const totalLines = testTableLines + coverageTableLines;
+  // Total lines: packages + separator + totals
+  const totalLines = packages.length + 2;
   let spinnerIdx = 0;
 
   const renderInterval = setInterval(() => {
     spinnerIdx++;
-    redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, coverageEnabled);
+    redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLines, inlineCoverage);
   }, 80);
 
   const promises = packages.map(async (pkg) => {
@@ -229,7 +197,7 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
   await Promise.all(promises);
 
   clearInterval(renderInterval);
-  redrawTable(packages, states, 0, nameWidth, lineWidth, totalLines, coverageEnabled);
+  redrawTable(packages, states, 0, nameWidth, lineWidth, totalLines, inlineCoverage);
 
   process.stdout.write(term.showCursor);
 
@@ -241,7 +209,8 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
 
   printSummary(totals.failed);
 
-  if (totals.failed > 0 && verbose) {
+  // Verbose: show failed output (only when not in coverage mode)
+  if (verbose && !coverageEnabled && totals.failed > 0) {
     console.log(c.dim('─'.repeat(lineWidth)));
     for (const pkg of packages) {
       const state = states[pkg.name];
@@ -252,7 +221,7 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
     }
   }
 
-  // Verbose coverage: show per-file details after the run
+  // Verbose + coverage: show detailed per-file coverage table after summary
   if (coverageEnabled && verbose) {
     const pkgsWithPaths = packages.map(pkg => ({
       name: pkg.name,
@@ -277,20 +246,37 @@ export async function runCI(packages, rootDir, verbose, coverageEnabled = false)
   const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
 
-  printHeader(nameWidth, lineWidth);
+  const inlineCoverage = coverageEnabled && !verbose;
 
   const states = {};
+
+  if (inlineCoverage) {
+    console.log(`\n${c.bold(c.cyan('Test & Coverage Summary'))}\n`);
+    console.log(renderInteractiveHeaderWithCoverage(nameWidth));
+    console.log(renderSeparatorWithCoverage(nameWidth));
+  } else {
+    printHeader(nameWidth, lineWidth);
+  }
 
   for (const pkg of packages) {
     states[pkg.name] = createInitialState();
     states[pkg.name].status = 'running';
 
     await runTestsWithStreaming(pkg, states[pkg.name], () => {}, coverageEnabled);
-    console.log(renderRow(pkg, states[pkg.name], 0, nameWidth));
+    if (inlineCoverage) {
+      console.log(renderInteractiveRowWithCoverage(pkg, states[pkg.name], 0, nameWidth));
+    } else {
+      console.log(renderRow(pkg, states[pkg.name], 0, nameWidth));
+    }
   }
 
-  printSeparator(lineWidth);
-  console.log(renderTotals(states, nameWidth));
+  if (inlineCoverage) {
+    console.log(renderSeparatorWithCoverage(nameWidth));
+    console.log(renderTotalsWithCoverage(states, nameWidth));
+  } else {
+    printSeparator(lineWidth);
+    console.log(renderTotals(states, nameWidth));
+  }
 
   const totals = Object.values(states).reduce((acc, s) => {
     acc.failed += s.failed || 0;
@@ -299,7 +285,8 @@ export async function runCI(packages, rootDir, verbose, coverageEnabled = false)
 
   printSummary(totals.failed);
 
-  if (totals.failed > 0 && verbose) {
+  // Verbose: show failed output (only when not in coverage mode)
+  if (verbose && !coverageEnabled && totals.failed > 0) {
     console.log(c.dim('─'.repeat(lineWidth)));
     for (const pkg of packages) {
       const state = states[pkg.name];
@@ -310,32 +297,17 @@ export async function runCI(packages, rootDir, verbose, coverageEnabled = false)
     }
   }
 
-  // Coverage output (CI mode - printed after all tests complete)
-  if (coverageEnabled) {
-    if (verbose) {
-      // Verbose: show per-file coverage details
-      const pkgsWithPaths = packages.map(pkg => ({
-        name: pkg.name,
-        dir: pkg.dir,
-        path: pkg.path,
-        runner: pkg.runner,
-      }));
-      const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
-      if (verboseData.packageDisplayData.length > 0) {
-        printVerboseCoverage(verboseData);
-      }
-    } else {
-      // Summary: show package-level coverage table
-      const coverageStates = {};
-      for (const pkg of packages) {
-        const state = states[pkg.name];
-        if (state.coverage) {
-          coverageStates[pkg.name] = { ...state.coverage, status: 'done' };
-        } else {
-          coverageStates[pkg.name] = { status: 'done', lines: '-', branches: '-', functions: '-' };
-        }
-      }
-      printCoverageTable(packages, coverageStates, nameWidth);
+  // Verbose + coverage: show detailed per-file coverage table after summary
+  if (coverageEnabled && verbose) {
+    const pkgsWithPaths = packages.map(pkg => ({
+      name: pkg.name,
+      dir: pkg.dir,
+      path: pkg.path,
+      runner: pkg.runner,
+    }));
+    const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+    if (verboseData.packageDisplayData.length > 0) {
+      printVerboseCoverage(verboseData);
     }
   }
 

@@ -1,45 +1,50 @@
 /**
- * Interactive mode for test summary
- * Keyboard handlers and interactive UI logic
+ * Interactive mode orchestrator.
+ *
+ * Single entry point for interactive test running.
+ * Owns: test state, child processes, single keypress handler,
+ * screen switching, alt buffer management, redraw dispatch.
+ *
+ * Delegates rendering to screen modules (screens/).
+ * Delegates input classification to input.js.
+ * Delegates state to state.js.
  */
 
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
-import c from 'picocolors';
-import {
-  term,
-  spinner,
-  createInitialState,
-  renderInteractiveRow,
-  renderTotals,
-  renderHelp,
-  renderInteractiveHeaderWithCoverage,
-  renderInteractiveRowWithCoverage,
-  renderSeparatorWithCoverage,
-  renderTotalsWithCoverage,
-} from '../ui.js';
+import { join, basename, relative } from 'node:path';
+
+import { term, spinner, createInitialState } from '../ui.js';
 import { getPackageCoverage } from '../coverage.js';
 import { createWatcherManager } from '../watcher.js';
-import {
-  parseVitestFinal,
-  parseBunFinal,
-  countVitestDots,
-  countBunDots,
-} from '../parsers.js';
+import { parseVitestFinal, parseBunFinal, countVitestDots, countBunDots, parseJunitFile } from '../parsers.js';
 
-/**
- * Run tests for a single package with streaming
- * @param {object} pkg - Package to run tests for
- * @param {object} state - State object for this package
- * @param {Function} onUpdate - Callback when state changes
- * @param {Map} childProcesses - Map of running child processes
- * @param {Set} pendingReruns - Set of package names queued for rerun
- * @param {Function} onComplete - Callback when tests complete (for deferred reruns)
- * @param {boolean} coverageEnabled - Whether to run with coverage
- */
-function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled = false) {
+import { classifyKey } from './input.js';
+import {
+  createViewState,
+  createCoverageFlags,
+  cycleCoverage,
+  togglePackageCoverage,
+  resetTestsState,
+  resetCoverageState,
+  createCursorDimTimer,
+} from './state.js';
+
+import { renderSummary } from './screens/summary.js';
+import { renderTestsScreen, buildTestRows, getSelectableIndices } from './screens/tests.js';
+import { renderCoverageScreen, buildCoverageRows, getSelectableFileIndices } from './screens/coverage.js';
+import { renderHelp } from './help.js';
+
+// Alternate screen buffer
+const ALT_SCREEN_ON = '\x1b[?1049h';
+const ALT_SCREEN_OFF = '\x1b[?1049l';
+
+// ============================================================================
+// Test running (kept from original — same logic, cleaner structure)
+// ============================================================================
+
+function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled) {
   return new Promise((resolve) => {
-    // Reset state
     state.status = 'running';
     state.passed = 0;
     state.skipped = 0;
@@ -50,48 +55,39 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
     state.exitCode = null;
     state.output = '';
     state.coverage = null;
+    state.testResults = null;
 
-    onUpdate();
+    onUpdate('started', pkg.name);
 
-    // Build command
     let command, args;
+    const junitPath = join(pkg.path, 'coverage', 'junit.xml');
+
     if (pkg.runner === 'vitest') {
       command = 'pnpm';
-      args = ['vitest', 'run', '--reporter=dot'];
-      if (coverageEnabled) {
-        args.push('--coverage');
-      }
+      args = ['vitest', 'run', '--reporter=dot', '--reporter=junit', '--outputFile.junit=coverage/junit.xml'];
+      if (coverageEnabled) args.push('--coverage');
     } else {
       command = 'bun';
-      args = ['test', '--dots'];
-      if (coverageEnabled) {
-        args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
-      }
+      args = ['test', '--dots', '--reporter=junit', '--reporter-outfile=coverage/junit.xml'];
+      if (coverageEnabled) args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
     }
 
-    const child = spawn(command, args, {
-      cwd: pkg.path,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
+    const child = spawn(command, args, { cwd: pkg.path, stdio: ['ignore', 'pipe', 'pipe'] });
     childProcesses.set(pkg.name, child);
 
     let output = '';
     const countDots = pkg.runner === 'vitest' ? countVitestDots : countBunDots;
 
-    const handleData = (data) => {
+    child.stdout.on('data', (data) => {
       const chunk = data.toString();
       output += chunk;
-
       const counts = countDots(chunk);
       state.passed += counts.passed;
       state.skipped += counts.skipped;
       state.failed += counts.failed;
+      onUpdate('streaming', pkg.name);
+    });
 
-      onUpdate();
-    };
-
-    child.stdout.on('data', handleData);
     child.stderr.on('data', (data) => {
       output += data.toString();
     });
@@ -109,37 +105,26 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
       state.failed = final.failed;
       state.duration = final.duration;
       state.output = output;
+      state.testResults = parseJunitFile(junitPath);
 
-      // Get coverage data if coverage is enabled
       if (coverageEnabled) {
         state.coverage = getPackageCoverage(pkg);
       }
 
       childProcesses.delete(pkg.name);
-      onUpdate();
-      
-      // Check for pending rerun after completion
-      if (onComplete) {
-        onComplete(pkg);
-      }
-      
+      onUpdate('completed', pkg.name);
+
+      if (onComplete) onComplete(pkg);
       resolve();
     });
   });
 }
 
-/**
- * Run all packages in parallel
- */
-function runAllPackages(packages, states, onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled = false) {
-  const promises = packages.map((pkg) =>
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onComplete, coverageEnabled)
-  );
-  return Promise.all(promises);
-}
+// ============================================================================
+// Main interactive mode
+// ============================================================================
 
 /**
- * Main interactive mode
  * @param {Array} packages - Package list
  * @param {string} rootDir - Workspace root directory
  * @param {object} config - Config object with optional watchMappings
@@ -147,425 +132,636 @@ function runAllPackages(packages, states, onUpdate, childProcesses, pendingRerun
  * @param {boolean} initialCoverageEnabled - Whether to start with coverage enabled
  */
 export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false) {
-  // nameWidth includes space for runner suffix: "pkg-name (vitest)"
-  const nameWidth = Math.max(20, ...packages.map((p) => p.name.length + p.runner.length + 3));
-  const lineWidth = nameWidth + 2 + 6 * 5 + 10;
-
-  // Initialize states
+  // ── State ──
   const states = {};
   for (const pkg of packages) {
     states[pkg.name] = createInitialState();
   }
 
-  // UI state
-  const uiState = {
-    selectedIndex: 0,
-    showingHelp: false,
-    currentCommand: '',
-    watchEnabled: initialWatchEnabled,
-    coverageEnabled: initialCoverageEnabled,
-    cursorDimmed: false,
-  };
-  
-  // Cursor dimming timeout (dim after 3 seconds of inactivity)
-  const CURSOR_DIM_DELAY = 3000;
-  let cursorDimTimeout = null;
-  
-  const resetCursorDimTimer = () => {
-    if (cursorDimTimeout) {
-      clearTimeout(cursorDimTimeout);
-    }
-    if (uiState.cursorDimmed) {
-      uiState.cursorDimmed = false;
-      redraw();
-    }
-    cursorDimTimeout = setTimeout(() => {
-      uiState.cursorDimmed = true;
-      redraw();
-    }, CURSOR_DIM_DELAY);
-  };
+  const viewState = createViewState();
+  const { flags: coverageFlags, snapshot: coverageSnapshot } = createCoverageFlags(packages, initialCoverageEnabled);
 
-  // Track child processes
+  let statusMessage = '';
+
+  // Child process tracking
   const childProcesses = new Map();
-  
-  // Track pending reruns (packages queued for rerun after current run completes)
   const pendingReruns = new Set();
-  // Track if "run all" is pending
   let pendingRunAll = false;
 
-  // Spinner
-  let spinnerIdx = 0;
-  let spinnerInterval = null;
+  // ── Render dispatch ──
 
-  /**
-   * Full redraw of the UI
-   */
-  const redraw = () => {
-    if (uiState.showingHelp) {
-      renderHelp(lineWidth);
+  const render = () => {
+    if (viewState.helpVisible) {
+      renderHelp();
       return;
     }
 
-    const cov = uiState.coverageEnabled;
+    switch (viewState.currentScreen) {
+      case 'summary':
+        renderSummary({
+          packages,
+          states,
+          coverageFlags,
+          summaryState: viewState.summary,
+          cursorDimmed: viewState.cursorDimmed,
+          spinnerIdx: viewState.spinnerIdx,
+          watchEnabled: viewState.watchEnabled,
+          statusMessage,
+        });
+        break;
 
-    // Move to top and clear
-    process.stdout.write(term.moveTo(1, 1));
+      case 'tests': {
+        const pkg = packages[viewState.summary.selectedIndex];
+        renderTestsScreen({
+          pkg,
+          state: states[pkg.name],
+          testsState: viewState.tests,
+          cursorDimmed: viewState.cursorDimmed,
+          coverageEnabled: coverageFlags[pkg.name],
+          spinnerIdx: viewState.spinnerIdx,
+        });
+        break;
+      }
 
-    // Header
-    const modeLabel = uiState.watchEnabled
-      ? `(${c.yellow('watching')})`
-      : '(interactive)';
-    const title = cov ? 'Test & Coverage Summary' : 'Test Summary';
-    process.stdout.write(term.clearLine);
-    console.log(`${c.bold(c.cyan(title))} ${c.dim(modeLabel)}\n`);
-
-    if (cov) {
-      console.log(renderInteractiveHeaderWithCoverage(nameWidth));
-      console.log(renderSeparatorWithCoverage(nameWidth));
-    } else {
-      console.log(c.dim(`  ${'Package'.padEnd(nameWidth)}${'Files'.padStart(6)}${'Tests'.padStart(6)}${'Pass'.padStart(6)}${'Skip'.padStart(6)}${'Fail'.padStart(6)}${'Duration'.padStart(10)}`));
-      console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
-    }
-
-    // Package rows
-    for (let i = 0; i < packages.length; i++) {
-      const pkg = packages[i];
-      const selected = i === uiState.selectedIndex;
-      process.stdout.write(term.clearLine);
-      if (cov) {
-        console.log(renderInteractiveRowWithCoverage(pkg, states[pkg.name], spinnerIdx, nameWidth, selected, uiState.cursorDimmed));
-      } else {
-        console.log(renderInteractiveRow(pkg, states[pkg.name], spinnerIdx, nameWidth, selected, uiState.cursorDimmed));
+      case 'coverage': {
+        const pkg = packages[viewState.summary.selectedIndex];
+        renderCoverageScreen({
+          pkg,
+          state: states[pkg.name],
+          coverageState: viewState.coverage,
+          cursorDimmed: viewState.cursorDimmed,
+          coverageEnabled: coverageFlags[pkg.name],
+          spinnerIdx: viewState.spinnerIdx,
+          rootDir,
+        });
+        break;
       }
     }
+  };
 
-    // Separator and totals
-    if (cov) {
-      console.log(renderSeparatorWithCoverage(nameWidth));
-      process.stdout.write(term.clearLine);
-      console.log(renderTotalsWithCoverage(states, nameWidth));
+  // ── onUpdate — called by test runners ──
+
+  const onUpdate = (type, _pkgName) => {
+    if (viewState.helpVisible) return;
+
+    if (viewState.currentScreen === 'summary') {
+      // Summary redraws on every update (streaming dots, completion)
+      render();
     } else {
-      console.log(`  ${c.dim('─'.repeat(lineWidth - 2))}`);
-      process.stdout.write(term.clearLine);
-      console.log(renderTotals(states, nameWidth));
-    }
-
-    // Status lines
-    console.log();
-    process.stdout.write(term.clearLine);
-    console.log(c.dim(uiState.currentCommand || ' '));
-    process.stdout.write(term.clearLine);
-    console.log(c.dim('↑↓ navigate  r:rerun  a:rerun all  c:coverage  w:watch  h:help  q:quit'));
-  };
-
-  const onUpdate = () => {
-    if (!uiState.showingHelp) {
-      redraw();
+      // Detail screens only redraw on run completion
+      if (type === 'completed') {
+        clampCursors();
+        render();
+      }
+      // 'streaming' and 'started' are ignored — spinner interval handles running indicator
     }
   };
 
-  /**
-   * Handle completion of a package test run - check for pending reruns
-   */
-  const onPackageComplete = (pkg) => {
-    // If "run all" is pending, don't run individual packages yet
-    if (pendingRunAll) {
+  // ── Cursor clamping after rerun ──
+
+  const clampCursors = () => {
+    const pkg = packages[viewState.summary.selectedIndex];
+    if (!pkg) return;
+
+    const testRows = buildTestRows(states[pkg.name].testResults);
+    const testSelectable = getSelectableIndices(testRows);
+    if (testSelectable.length > 0) {
+      if (!testSelectable.includes(viewState.tests.selectedIndex)) {
+        // Find nearest selectable
+        const nearest = testSelectable.reduce((prev, curr) =>
+          Math.abs(curr - viewState.tests.selectedIndex) < Math.abs(prev - viewState.tests.selectedIndex) ? curr : prev,
+        );
+        viewState.tests.selectedIndex = nearest;
+      }
+    } else {
+      viewState.tests.selectedIndex = 0;
+    }
+
+    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const covSelectable = getSelectableFileIndices(covRows);
+    if (covSelectable.length > 0) {
+      if (!covSelectable.includes(viewState.coverage.selectedIndex)) {
+        const nearest = covSelectable.reduce((prev, curr) =>
+          Math.abs(curr - viewState.coverage.selectedIndex) < Math.abs(prev - viewState.coverage.selectedIndex) ? curr : prev,
+        );
+        viewState.coverage.selectedIndex = nearest;
+      }
+    } else {
+      viewState.coverage.selectedIndex = 0;
+    }
+  };
+
+  // ── Cursor dim timer ──
+
+  const dimTimer = createCursorDimTimer(viewState, render);
+  viewState.watchEnabled = initialWatchEnabled;
+
+  // ── Run helpers ──
+
+  const runPkg = (pkg, message) => {
+    if (states[pkg.name].status === 'running') {
+      pendingReruns.add(pkg.name);
+      statusMessage = `[${pkg.name}] Queued for rerun...`;
+      render();
       return;
     }
-    
-    // Check if this package has a pending rerun
+    statusMessage = message || `[${pkg.name}] Running...`;
+    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPkgComplete, coverageFlags[pkg.name]);
+  };
+
+  const onPkgComplete = (pkg) => {
+    if (pendingRunAll) return;
     if (pendingReruns.has(pkg.name)) {
       pendingReruns.delete(pkg.name);
-      uiState.currentCommand = `[${pkg.name}] Rerunning (queued)...`;
-      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
+      statusMessage = `[${pkg.name}] Rerunning (queued)...`;
+      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPkgComplete, coverageFlags[pkg.name]);
     }
   };
-  
-  /**
-   * Check if all tests are done, then handle pending "run all"
-   */
+
   const checkPendingRunAll = () => {
     if (!pendingRunAll) return;
-    
-    const allDone = packages.every((pkg) => states[pkg.name].status !== 'running');
-    if (allDone) {
+    if (packages.every((pkg) => states[pkg.name].status !== 'running')) {
       pendingRunAll = false;
-      pendingReruns.clear(); // Clear individual pending since we're running all
+      pendingReruns.clear();
       runAllNow();
     }
   };
-  
-  /**
-   * Actually run all packages now
-   */
+
   const runAllNow = () => {
-    uiState.currentCommand = uiState.coverageEnabled ? 'Running all packages with coverage...' : 'Running all packages...';
-    const promises = packages.map((pkg) =>
-      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (completedPkg) => {
-        onPackageComplete(completedPkg);
+    statusMessage = 'Running all packages...';
+    packages.forEach((pkg) =>
+      runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (p) => {
+        onPkgComplete(p);
         checkPendingRunAll();
-      }, uiState.coverageEnabled)
+      }, coverageFlags[pkg.name]),
     );
-    Promise.all(promises);
   };
 
-  /**
-   * Run selected package (queue if already running)
-   */
-  const runSelected = () => {
-    const pkg = packages[uiState.selectedIndex];
-    if (states[pkg.name].status === 'running') {
-      // Queue for rerun after current run completes
-      pendingReruns.add(pkg.name);
-      uiState.currentCommand = `[${pkg.name}] Queued for rerun...`;
-      onUpdate();
-      return;
-    }
-    const covSuffix = uiState.coverageEnabled ? ' --coverage' : '';
-    uiState.currentCommand = `[${pkg.name}] ${pkg.runner === 'vitest' ? 'pnpm vitest run --reporter=dot' : 'bun test --dots'}${covSuffix}`;
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
-  };
-  
-  /**
-   * Run a specific package (used by watcher)
-   */
-  const runPackage = (pkg, message) => {
-    if (states[pkg.name].status === 'running') {
-      // Queue for rerun after current run completes
-      pendingReruns.add(pkg.name);
-      uiState.currentCommand = `[${pkg.name}] Queued for rerun...`;
-      onUpdate();
-      return;
-    }
-    uiState.currentCommand = message || `[${pkg.name}] Running...`;
-    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, onPackageComplete, uiState.coverageEnabled);
-  };
-
-  /**
-   * Run all packages (queue if any running)
-   */
   const runAll = () => {
-    const anyRunning = packages.some((pkg) => states[pkg.name].status === 'running');
-    if (anyRunning) {
-      // Queue "run all" for when all current runs complete
+    if (packages.some((pkg) => states[pkg.name].status === 'running')) {
       pendingRunAll = true;
-      uiState.currentCommand = 'Queued: rerun all after current tests...';
-      onUpdate();
+      statusMessage = 'Queued: rerun all after current tests...';
+      render();
       return;
     }
     runAllNow();
   };
 
-  // Create watcher manager with config watchMappings
+  const rerunPackages = (pkgNames) => {
+    for (const name of pkgNames) {
+      const pkg = packages.find((p) => p.name === name);
+      if (pkg) runPkg(pkg, `[${pkg.name}] Coverage enabled, rerunning...`);
+    }
+  };
+
+  // ── Screen navigation ──
+
+  const enterDetailScreen = () => {
+    resetTestsState(viewState);
+    resetCoverageState(viewState);
+    // Initialize cursor to first selectable test
+    const pkg = packages[viewState.summary.selectedIndex];
+    const testRows = buildTestRows(states[pkg.name].testResults);
+    const selectable = getSelectableIndices(testRows);
+    viewState.tests.selectedIndex = selectable.length > 0 ? selectable[0] : 0;
+  };
+
+  const navigateForward = () => {
+    if (viewState.currentScreen === 'summary') {
+      // Enter tests screen for selected package
+      viewState.currentScreen = 'tests';
+      enterDetailScreen();
+      process.stdout.write(ALT_SCREEN_ON);
+      render();
+    } else if (viewState.currentScreen === 'tests') {
+      // Keep popover state when switching to coverage
+      viewState.currentScreen = 'coverage';
+      // Initialize cursor to first selectable file
+      const pkg = packages[viewState.summary.selectedIndex];
+      const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+      const selectable = getSelectableFileIndices(covRows);
+      if (selectable.length > 0 && !selectable.includes(viewState.coverage.selectedIndex)) {
+        viewState.coverage.selectedIndex = selectable[0];
+      }
+      render();
+    }
+    // coverage → nothing
+  };
+
+  const navigateBack = () => {
+    if (viewState.currentScreen === 'coverage') {
+      viewState.currentScreen = 'tests';
+      render();
+    } else if (viewState.currentScreen === 'tests') {
+      if (viewState.tests.popoverVisible) {
+        viewState.tests.popoverVisible = false;
+        viewState.tests.popoverScrollOffset = 0;
+      }
+      viewState.currentScreen = 'summary';
+      process.stdout.write(ALT_SCREEN_OFF);
+      process.stdout.write(term.clearScreen);
+      render();
+    }
+    // summary → nothing
+  };
+
+  /**
+   * Switch to adjacent package while in tests or coverage screen.
+   * Updates summary.selectedIndex (the single source of truth),
+   * resets per-package view state, and re-renders.
+   * @param {number} direction - +1 for next, -1 for previous
+   */
+  const switchPackage = (direction) => {
+    const newIdx = viewState.summary.selectedIndex + direction;
+    if (newIdx < 0 || newIdx >= packages.length) return;
+    viewState.summary.selectedIndex = newIdx;
+    // Close popover if open
+    if (viewState.tests.popoverVisible) {
+      viewState.tests.popoverVisible = false;
+      viewState.tests.popoverScrollOffset = 0;
+    }
+    enterDetailScreen();
+    // Also reset coverage cursor for the new package
+    const pkg = packages[newIdx];
+    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const covSelectable = getSelectableFileIndices(covRows);
+    viewState.coverage.selectedIndex = covSelectable.length > 0 ? covSelectable[0] : 0;
+    viewState.coverage.scrollOffset = 0;
+    render();
+  };
+
+  // ── Vertical navigation helpers ──
+
+  const moveTestsCursor = (direction) => {
+    const pkg = packages[viewState.summary.selectedIndex];
+    const testRows = buildTestRows(states[pkg.name].testResults);
+    const selectable = getSelectableIndices(testRows);
+    if (selectable.length === 0) return;
+
+    const currentPos = selectable.indexOf(viewState.tests.selectedIndex);
+    if (currentPos === -1) {
+      // Jump to nearest
+      viewState.tests.selectedIndex = direction > 0 ? selectable[0] : selectable[selectable.length - 1];
+    } else {
+      const newPos = currentPos + direction;
+      if (newPos >= 0 && newPos < selectable.length) {
+        viewState.tests.selectedIndex = selectable[newPos];
+      }
+    }
+  };
+
+  const moveCoverageCursor = (direction) => {
+    const pkg = packages[viewState.summary.selectedIndex];
+    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const selectable = getSelectableFileIndices(covRows);
+    if (selectable.length === 0) return;
+
+    const currentPos = selectable.indexOf(viewState.coverage.selectedIndex);
+    if (currentPos === -1) {
+      viewState.coverage.selectedIndex = direction > 0 ? selectable[0] : selectable[selectable.length - 1];
+    } else {
+      const newPos = currentPos + direction;
+      if (newPos >= 0 && newPos < selectable.length) {
+        viewState.coverage.selectedIndex = selectable[newPos];
+      }
+    }
+  };
+
+  // ── Action handlers ──
+
+  const getSelectedPkg = () => {
+    return packages[viewState.summary.selectedIndex];
+  };
+
+  const handleAction = (action) => {
+    switch (action) {
+      case 'rerun': {
+        const pkg = getSelectedPkg();
+        runPkg(pkg, `[${pkg.name}] Rerunning...`);
+        break;
+      }
+
+      case 'rerun-all':
+        runAll();
+        break;
+
+      case 'coverage': {
+        const pkg = getSelectedPkg();
+        const nowOn = togglePackageCoverage(pkg.name, coverageFlags, coverageSnapshot);
+        if (nowOn) {
+          runPkg(pkg, `[${pkg.name}] Coverage enabled, rerunning...`);
+        } else {
+          statusMessage = `[${pkg.name}] Coverage disabled`;
+          render();
+        }
+        break;
+      }
+
+      case 'coverage-all': {
+        const changedToOn = cycleCoverage(coverageFlags, coverageSnapshot);
+        if (changedToOn.length > 0) {
+          rerunPackages(changedToOn);
+        } else {
+          render();
+        }
+        break;
+      }
+
+      case 'watch':
+        viewState.watchEnabled = !viewState.watchEnabled;
+        if (viewState.watchEnabled) {
+          watcherManager.start();
+          statusMessage = 'File watching enabled';
+        } else {
+          watcherManager.stop();
+          statusMessage = 'File watching disabled';
+        }
+        render();
+        break;
+
+      case 'help':
+        viewState.helpVisible = true;
+        render();
+        break;
+
+      case 'quit':
+        cleanup();
+        process.exit(0);
+        break;
+    }
+  };
+
+  // ── Enter action (popover) ──
+
+  const executeEnterAction = () => {
+    const actionCommand = config.enterAction?.command;
+    if (!actionCommand) return; // No action configured — do nothing
+
+    const pkg = getSelectedPkg();
+    const testRows = buildTestRows(states[pkg.name].testResults);
+    const row = testRows[viewState.tests.selectedIndex];
+    if (!row || row.type !== 'test') return;
+
+    // Build placeholder values
+    const pkgFilePath = row.file || '';
+    const absFilePath = pkgFilePath ? join(pkg.path, pkgFilePath) : '';
+    const filePath = absFilePath ? relative(rootDir, absFilePath) : '';
+    const fileName = pkgFilePath ? basename(pkgFilePath) : '';
+
+    const resolved = actionCommand
+      .replace(/\{filePath\}/g, filePath)
+      .replace(/\{pkgFilePath\}/g, pkgFilePath)
+      .replace(/\{absFilePath\}/g, absFilePath)
+      .replace(/\{fileName\}/g, fileName)
+      .replace(/\{line\}/g, '1')
+      .replace(/\{testName\}/g, row.test.name)
+      .replace(/\{packagePath\}/g, pkg.path)
+      .replace(/\{packageName\}/g, pkg.name);
+
+    // Fire-and-forget: spawn detached, ignore stdio
+    try {
+      const child = spawn(resolved, { shell: true, detached: true, stdio: 'ignore' });
+      child.unref();
+    } catch {
+      // Silently ignore spawn errors — don't crash interactive mode
+    }
+  };
+
+  // ── Single keypress handler ──
+
+  const handleKeypress = (str, key) => {
+    const evt = classifyKey(str, key);
+    if (!evt) return;
+
+    // Ctrl+C always works
+    if (evt.type === 'ctrl-c') {
+      cleanup();
+      process.exit(0);
+    }
+
+    // Any keypress resets cursor dim
+    dimTimer.reset();
+
+    // 1. Help visible — only Escape closes it
+    if (viewState.helpVisible) {
+      if (evt.type === 'escape') {
+        viewState.helpVisible = false;
+        process.stdout.write(term.clearScreen);
+        render();
+      }
+      return;
+    }
+
+    // 2. Popover visible (tests screen only)
+    if (viewState.currentScreen === 'tests' && viewState.tests.popoverVisible) {
+      if (evt.type === 'escape') {
+        viewState.tests.popoverVisible = false;
+        viewState.tests.popoverScrollOffset = 0;
+        render();
+        return;
+      }
+
+      if (evt.type === 'enter') {
+        executeEnterAction();
+        return;
+      }
+
+      if (evt.type === 'vertical') {
+        viewState.tests.popoverScrollOffset = Math.max(0, viewState.tests.popoverScrollOffset + evt.direction);
+        render();
+        return;
+      }
+
+      // PgUp/PgDn switches package even with popover open
+      if (evt.type === 'vertical-page') {
+        switchPackage(evt.direction);
+        return;
+      }
+
+      // Horizontal navigation: ← closes popover and goes back, → keeps popover and goes to coverage
+      if (evt.type === 'horizontal') {
+        if (evt.direction === -1) {
+          viewState.tests.popoverVisible = false;
+          viewState.tests.popoverScrollOffset = 0;
+          navigateBack();
+        } else {
+          navigateForward(); // popover stays open when going to coverage
+        }
+        return;
+      }
+
+      // Actions work with popover open
+      if (evt.type === 'action') {
+        handleAction(evt.action);
+        return;
+      }
+
+      return;
+    }
+
+    // 3. Normal mode — no popover, no help
+
+    // Horizontal navigation
+    if (evt.type === 'horizontal') {
+      if (evt.direction === 1) navigateForward();
+      else navigateBack();
+      return;
+    }
+
+    // Vertical navigation
+    if (evt.type === 'vertical') {
+      switch (viewState.currentScreen) {
+        case 'summary':
+          viewState.summary.selectedIndex = Math.max(
+            0,
+            Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction),
+          );
+          render();
+          break;
+
+        case 'tests':
+          moveTestsCursor(evt.direction);
+          render();
+          break;
+
+        case 'coverage':
+          moveCoverageCursor(evt.direction);
+          render();
+          break;
+      }
+      return;
+    }
+
+    // Vertical page navigation
+    if (evt.type === 'vertical-page') {
+      if (viewState.currentScreen === 'summary') {
+        const halfPage = Math.floor(packages.length / 2) || 1;
+        viewState.summary.selectedIndex = Math.max(
+          0,
+          Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction * halfPage),
+        );
+        render();
+      } else {
+        // tests or coverage — switch package
+        switchPackage(evt.direction);
+      }
+      return;
+    }
+
+    // Enter
+    if (evt.type === 'enter') {
+      if (viewState.currentScreen === 'summary') {
+        // Enter on summary → go to tests screen (same as →)
+        navigateForward();
+      } else if (viewState.currentScreen === 'tests') {
+        const pkg = packages[viewState.summary.selectedIndex];
+        const testRows = buildTestRows(states[pkg.name].testResults);
+        const selectable = getSelectableIndices(testRows);
+        if (selectable.includes(viewState.tests.selectedIndex)) {
+          viewState.tests.popoverVisible = true;
+          viewState.tests.popoverScrollOffset = 0;
+          render();
+        }
+      }
+      // Enter does nothing on coverage
+      return;
+    }
+
+    // Escape — does nothing when no popover/help is open
+    if (evt.type === 'escape') {
+      return;
+    }
+
+    // Actions
+    if (evt.type === 'action') {
+      handleAction(evt.action);
+      return;
+    }
+  };
+
+  // ── Watcher ──
+
   const watchMappings = config.watchMappings || [];
-  const watcherManager = createWatcherManager(rootDir, packages, watchMappings, (pkg, filePath, type) => {
+  const watcherManager = createWatcherManager(rootDir, packages, watchMappings, (pkg, _filePath, type) => {
     if (type === 'all') {
-      // triggers: "*" - run all packages
       runAll();
     } else {
-      // Direct or mapped change - run specific package
       const source = type === 'mapped' ? ' (mapped)' : '';
-      runPackage(pkg, `[${pkg.name}] File changed${source} → rerunning...`);
+      runPkg(pkg, `[${pkg.name}] File changed${source} → rerunning...`);
     }
   });
 
-  /**
-   * Cleanup resources
-   */
+  // ── Cleanup ──
+
   const cleanup = () => {
-    // Kill all child processes
     for (const [, child] of childProcesses) {
-      if (child && !child.killed) {
-        child.kill('SIGTERM');
-      }
+      if (child && !child.killed) child.kill('SIGTERM');
     }
     childProcesses.clear();
 
-    // Stop spinner
-    if (spinnerInterval) {
-      clearInterval(spinnerInterval);
-    }
-    
-    // Stop cursor dim timer
-    if (cursorDimTimeout) {
-      clearTimeout(cursorDimTimeout);
-    }
-
-    // Stop file watcher
+    if (spinnerInterval) clearInterval(spinnerInterval);
+    dimTimer.stop();
     watcherManager.stop();
 
-    // Restore terminal
+    // Restore terminal — leave alt screen if we're in it
+    if (viewState.currentScreen !== 'summary') {
+      process.stdout.write(ALT_SCREEN_OFF);
+    }
     process.stdout.write(term.showCursor);
-    if (process.stdin.setRawMode) {
-      process.stdin.setRawMode(false);
-    }
+    if (process.stdin.setRawMode) process.stdin.setRawMode(false);
   };
 
-  /**
-   * Setup keyboard handlers
-   */
-  const setupKeyboard = () => {
-    if (!process.stdin.setRawMode) {
-      console.error('Interactive mode requires a TTY. Run in a terminal.');
-      process.exit(1);
-    }
-    emitKeypressEvents(process.stdin);
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
+  // ── Setup ──
 
-    process.stdin.on('keypress', (str, key) => {
-      // Handle help overlay - any key closes it
-      if (uiState.showingHelp) {
-        uiState.showingHelp = false;
-        process.stdout.write(term.clearScreen);
-        redraw();
-        return;
-      }
-
-      // Handle Ctrl+C
-      if (key && key.ctrl && key.name === 'c') {
-        cleanup();
-        process.exit(0);
-      }
-
-      // Navigation - arrow keys (reset cursor dim)
-      if (key && key.name === 'up') {
-        resetCursorDimTimer();
-        uiState.selectedIndex = Math.max(0, uiState.selectedIndex - 1);
-        redraw();
-        return;
-      }
-
-      if (key && key.name === 'down') {
-        resetCursorDimTimer();
-        uiState.selectedIndex = Math.min(packages.length - 1, uiState.selectedIndex + 1);
-        redraw();
-        return;
-      }
-
-      // Navigation - vim keys (j/k) (reset cursor dim)
-      if (str === 'k') {
-        resetCursorDimTimer();
-        uiState.selectedIndex = Math.max(0, uiState.selectedIndex - 1);
-        redraw();
-        return;
-      }
-
-      if (str === 'j') {
-        resetCursorDimTimer();
-        uiState.selectedIndex = Math.min(packages.length - 1, uiState.selectedIndex + 1);
-        redraw();
-        return;
-      }
-
-      // Run selected package (reset cursor dim)
-      if (str === 'r' || (key && key.name === 'return')) {
-        resetCursorDimTimer();
-        runSelected();
-        return;
-      }
-
-      if (str === 'a') {
-        runAll();
-        return;
-      }
-
-      // Toggle coverage mode
-      if (str === 'c') {
-        uiState.coverageEnabled = !uiState.coverageEnabled;
-        if (uiState.coverageEnabled) {
-          uiState.currentCommand = 'Coverage enabled - rerunning all packages...';
-          // Clear screen to accommodate coverage section
-          process.stdout.write(term.clearScreen);
-          runAll();
-        } else {
-          uiState.currentCommand = 'Coverage disabled';
-          // Clear screen since we're removing coverage section
-          process.stdout.write(term.clearScreen);
-          redraw();
-        }
-        return;
-      }
-
-      // Toggle watch mode
-      if (str === 'w') {
-        uiState.watchEnabled = !uiState.watchEnabled;
-        if (uiState.watchEnabled) {
-          watcherManager.start();
-          uiState.currentCommand = 'File watching enabled';
-        } else {
-          watcherManager.stop();
-          uiState.currentCommand = 'File watching disabled';
-        }
-        redraw();
-        return;
-      }
-
-      // Help
-      if (str === 'h') {
-        uiState.showingHelp = true;
-        redraw();
-        return;
-      }
-
-      // Quit
-      if (str === 'q') {
-        cleanup();
-        process.exit(0);
-      }
-    });
-  };
-
-  // Setup cleanup handlers
   process.on('exit', cleanup);
-  process.on('SIGINT', () => {
-    cleanup();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    cleanup();
-    process.exit(0);
-  });
+  process.on('SIGINT', () => { cleanup(); process.exit(0); });
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
 
-  // Hide cursor
-  process.stdout.write(term.hideCursor);
+  if (!process.stdin.setRawMode) {
+    console.error('Interactive mode requires a TTY. Run in a terminal.');
+    process.exit(1);
+  }
 
-  // Clear screen
-  process.stdout.write(term.clearScreen);
+  emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.on('keypress', handleKeypress);
 
-  // Setup keyboard handlers BEFORE running tests
-  setupKeyboard();
+  process.stdout.write(term.hideCursor + term.clearScreen);
 
   // Initial render
-  redraw();
-  
-  // Start cursor dim timer
-  resetCursorDimTimer();
+  render();
+  dimTimer.reset();
 
-  // Start spinner interval (use interval from cli-spinners)
-  spinnerInterval = setInterval(() => {
-    spinnerIdx++;
-    const hasRunning = Object.values(states).some((s) => s.status === 'running');
-    if (hasRunning && !uiState.showingHelp) {
-      redraw();
+  // Spinner interval
+  const spinnerInterval = setInterval(() => {
+    viewState.spinnerIdx++;
+    if (viewState.helpVisible) return;
+
+    if (viewState.currentScreen === 'summary') {
+      const anyRunning = Object.values(states).some((s) => s.status === 'running');
+      if (anyRunning) render();
+    } else {
+      const pkg = packages[viewState.summary.selectedIndex];
+      if (pkg && states[pkg.name].status === 'running') render();
     }
   }, spinner.interval);
 
   // Run all tests initially
-  uiState.currentCommand = uiState.coverageEnabled ? 'Running all packages with coverage...' : 'Running all packages...';
-  await runAllPackages(packages, states, onUpdate, childProcesses, pendingReruns, (completedPkg) => {
-    onPackageComplete(completedPkg);
-    checkPendingRunAll();
-  }, uiState.coverageEnabled);
+  statusMessage = 'Running all packages...';
+  const initialPromises = packages.map((pkg) =>
+    runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (p) => {
+      onPkgComplete(p);
+      checkPendingRunAll();
+    }, coverageFlags[pkg.name]),
+  );
+  await Promise.all(initialPromises);
 
-  // Clear the "Running all packages..." message
-  uiState.currentCommand = '';
-  redraw();
+  statusMessage = '';
+  render();
 
-  // Start file watcher if enabled
-  if (uiState.watchEnabled) {
+  // Start watcher if enabled
+  if (viewState.watchEnabled) {
     watcherManager.start();
   }
-
-  // Keep the process alive (stdin raw mode keeps it alive)
 }

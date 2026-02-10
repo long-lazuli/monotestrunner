@@ -400,6 +400,7 @@ export function renderHelp(lineWidth) {
     '  Navigation',
     '    ↑/k       Move selection up',
     '    ↓/j       Move selection down',
+    '    →/l       Open package detail view',
     '',
     '  Run Tests',
     '    r/Enter   Rerun selected package',
