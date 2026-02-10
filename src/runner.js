@@ -34,6 +34,12 @@ import { join } from 'node:path';
 export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = false) {
   return new Promise((resolve) => {
     const runner = getRunner(pkg.runner);
+    if (!runner) {
+      state.status = 'unknown-runner';
+      onUpdate();
+      resolve();
+      return;
+    }
     const junitPath = join(pkg.path, 'coverage', 'junit.xml');
     const { command, args } = runner.buildCommand({ coverage: coverageEnabled });
 

@@ -106,12 +106,16 @@ function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDim
   // No test script — dim row with centered message
   if (state.status === 'no-tests') {
     const label = 'no tests';
-    // Span across Files+Tests+Pass+Skip+Fail columns (30 chars)
-    const colSpan = 30;
-    const padLeft = Math.floor((colSpan - label.length) / 2);
-    const padRight = colSpan - label.length - padLeft;
-    const noTestCols = `${' '.repeat(padLeft)}${label}${' '.repeat(padRight)}`;
-    const left = c.dim(`${marker} ${paddedName}${runnerSuffix}${noTestCols}`);
+    const left = c.dim(`${marker} ${paddedName}${runnerSuffix}${centerInCols(label, 30)}`);
+    const cov = formatOffCov();
+    const dur = c.dim(formatDuration(null));
+    return `${left} ${sep} ${cov} ${sep} ${dur}`;
+  }
+
+  // Has a test script but runner not recognized — dim row with warning
+  if (state.status === 'unknown-runner') {
+    const label = 'unknown runner';
+    const left = c.dim(`${marker} ${paddedName}${runnerSuffix}${centerInCols(label, 30)}`);
     const cov = formatOffCov();
     const dur = c.dim(formatDuration(null));
     return `${left} ${sep} ${cov} ${sep} ${dur}`;
@@ -163,14 +167,22 @@ function formatPendingCov() {
 }
 
 /**
+ * Center a label within a fixed-width column span.
+ * @param {string} label - Text to center
+ * @param {number} width - Total width to fill
+ * @returns {string}
+ */
+function centerInCols(label, width) {
+  const padLeft = Math.floor((width - label.length) / 2);
+  const padRight = width - label.length - padLeft;
+  return `${' '.repeat(padLeft)}${label}${' '.repeat(padRight)}`;
+}
+
+/**
  * Format coverage columns as 'off' — centered across the 3-column span.
  */
 function formatOffCov() {
-  const totalWidth = COV_SECTION_WIDTH; // 24 chars
-  const label = 'off';
-  const padLeft = Math.floor((totalWidth - label.length) / 2);
-  const padRight = totalWidth - label.length - padLeft;
-  return c.dim(' '.repeat(padLeft) + label + ' '.repeat(padRight));
+  return c.dim(centerInCols('off', COV_SECTION_WIDTH));
 }
 
 /**

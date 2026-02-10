@@ -42,6 +42,9 @@ import { resolveCommand } from './command.js';
 const ALT_SCREEN_ON = '\x1b[?1049h';
 const ALT_SCREEN_OFF = '\x1b[?1049l';
 
+/** Can this package actually be run? Needs both a test script and a recognized runner. */
+const isRunnable = (pkg) => pkg.testScript !== null && pkg.runner !== null;
+
 // ============================================================================
 // Test running (kept from original — same logic, cleaner structure)
 // ============================================================================
@@ -126,22 +129,24 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
  */
 export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false, isSinglePackage = false) {
 
-  // Filter testable packages for running (keep all for display)
-  const testablePackages = packages.filter((p) => p.testScript !== null);
+  // Filter runnable packages for running (keep all for display)
+  const testablePackages = packages.filter(isRunnable);
   // ── State ──
   const states = {};
   for (const pkg of packages) {
     const s = createInitialState();
     if (!pkg.testScript) {
       s.status = 'no-tests';
+    } else if (!pkg.runner) {
+      s.status = 'unknown-runner';
     }
     states[pkg.name] = s;
   }
 
   const viewState = createViewState();
 
-  // Start cursor on the first testable package
-  const firstTestable = packages.findIndex((p) => p.testScript !== null);
+  // Start cursor on the first runnable package
+  const firstTestable = packages.findIndex(isRunnable);
   if (firstTestable > 0) viewState.summary.selectedIndex = firstTestable;
 
   const { flags: coverageFlags, snapshot: coverageSnapshot } = createCoverageFlags(packages, initialCoverageEnabled);
@@ -263,7 +268,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
   // ── Run helpers ──
 
   const runPkg = (pkg, message) => {
-    if (!pkg.testScript) return; // No test script — nothing to run
+    if (!isRunnable(pkg)) return; // No test script or unknown runner — nothing to run
     if (states[pkg.name].status === 'running') {
       pendingReruns.add(pkg.name);
       statusMessage = `[${pkg.name}] Queued for rerun...`;
@@ -333,9 +338,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   const navigateForward = () => {
     if (viewState.currentScreen === 'summary') {
-      // Don't enter detail for no-test packages
+      // Don't enter detail for non-runnable packages
       const selectedPkg = packages[viewState.summary.selectedIndex];
-      if (!selectedPkg.testScript) return;
+      if (!isRunnable(selectedPkg)) return;
       // Enter tests screen for selected package
       viewState.currentScreen = 'tests';
       enterDetailScreen();
@@ -386,8 +391,8 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
    */
   const switchPackage = (direction) => {
     let newIdx = viewState.summary.selectedIndex + direction;
-    // Skip no-test packages
-    while (newIdx >= 0 && newIdx < packages.length && !packages[newIdx].testScript) {
+    // Skip non-runnable packages
+    while (newIdx >= 0 && newIdx < packages.length && !isRunnable(packages[newIdx])) {
       newIdx += direction;
     }
     if (newIdx < 0 || newIdx >= packages.length) return;
@@ -817,9 +822,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     if (evt.type === 'vertical') {
       switch (viewState.currentScreen) {
         case 'summary': {
-          // Skip no-test packages
+          // Skip non-runnable packages
           let idx = viewState.summary.selectedIndex + evt.direction;
-          while (idx >= 0 && idx < packages.length && !packages[idx].testScript) {
+          while (idx >= 0 && idx < packages.length && !isRunnable(packages[idx])) {
             idx += evt.direction;
           }
           if (idx >= 0 && idx < packages.length) {
@@ -847,8 +852,8 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       if (viewState.currentScreen === 'summary') {
         const halfPage = Math.floor(packages.length / 2) || 1;
         let idx = Math.max(0, Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction * halfPage));
-        // Snap to nearest testable package
-        while (idx >= 0 && idx < packages.length && !packages[idx].testScript) {
+        // Snap to nearest runnable package
+        while (idx >= 0 && idx < packages.length && !isRunnable(packages[idx])) {
           idx += evt.direction;
         }
         if (idx >= 0 && idx < packages.length) {

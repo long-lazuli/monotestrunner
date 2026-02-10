@@ -78,8 +78,8 @@ async function main() {
 
   // Fallback mode: single package with no workspace config → skip summary
   const isSinglePackage = packages.length === 1 && packages[0].path === rootDir;
-  // Packages that actually have tests (for non-interactive modes)
-  const testablePackages = packages.filter((p) => p.testScript !== null);
+  // Packages that actually have tests and a recognized runner (for non-interactive modes)
+  const testablePackages = packages.filter((p) => p.testScript !== null && p.runner !== null);
 
   if (interactive) {
     await runInteractiveMode(packages, rootDir, config, watchInitial, coverage, isSinglePackage);
