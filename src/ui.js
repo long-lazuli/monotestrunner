@@ -5,29 +5,31 @@
 
 import c from 'picocolors';
 import cliSpinners from 'cli-spinners';
+import ansiEscapes from 'ansi-escapes';
+import stripAnsiLib from 'strip-ansi';
 
-// Terminal control codes (picocolors doesn't handle these)
+// Re-export strip-ansi for all consumers
+export const stripAnsi = stripAnsiLib;
+
+// Terminal control codes via ansi-escapes
 export const term = {
-  clearLine: '\x1b[K',
-  clearScreen: '\x1b[2J',
-  hideCursor: '\x1b[?25l',
-  showCursor: '\x1b[?25h',
-  moveUp: (n) => `\x1b[${n}A`,
-  moveTo: (row, col) => `\x1b[${row};${col}H`,
+  clearLine: ansiEscapes.eraseLine,
+  clearScreen: ansiEscapes.eraseScreen,
+  hideCursor: ansiEscapes.cursorHide,
+  showCursor: ansiEscapes.cursorShow,
+  moveUp: (n) => ansiEscapes.cursorUp(n),
+  moveTo: (row, col) => ansiEscapes.cursorTo(col - 1, row - 1), // ansi-escapes uses 0-based
+  enterAltScreen: ansiEscapes.enterAlternativeScreen,
+  exitAltScreen: ansiEscapes.exitAlternativeScreen,
+  enableMouse: '\x1b[?1000h\x1b[?1006h', // basic mouse + SGR extended
+  disableMouse: '\x1b[?1000l\x1b[?1006l',
+  syncStart: ansiEscapes.beginSynchronizedUpdate ?? '',
+  syncEnd: ansiEscapes.endSynchronizedUpdate ?? '',
 };
-
-
 
 // Spinner from cli-spinners
 export const spinner = cliSpinners.dots;
 export const spinnerFrames = spinner.frames;
-
-/**
- * Strip ANSI escape codes from string
- */
-export function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;]*m/g, '');
-}
 
 /**
  * Format a number for display, right-aligned

@@ -5,6 +5,9 @@
   "description": "A parallel test runner for monorepos with an interactive terminal UI. Runs tests across multiple packages simultaneously and displays real-time results in a beautiful summary table.",
   "author": "Long-lazuli",
   "main": "index.js",
+  "bin": {
+    "monotestrunner": "./index.js"
+  },
   "scripts": {
     "test": "vitest run index.test.js --reporter=verbose"
   },
@@ -16,5 +19,20 @@
   "bugs": {
     "url": "https://github.com/long-lazuli/monotestrunner/issues"
   },
-  "homepage": "https://github.com/long-lazuli/monotestrunner#readme"
+  "homepage": "https://github.com/long-lazuli/monotestrunner#readme",
+  "dependencies": {
+    "ansi-escapes": "^7.3.0",
+    "chokidar": "^5.0.0",
+    "cli-spinners": "^3.4.0",
+    "lilconfig": "^3.1.3",
+    "meow": "^14.0.0",
+    "picocolors": "^1.1.1",
+    "picomatch": "^4.0.3",
+    "slice-ansi": "^8.0.0",
+    "strip-ansi": "^7.1.2"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.18",
+    "vitest": "^4.0.18"
+  }
 }
