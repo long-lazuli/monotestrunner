@@ -1,6 +1,6 @@
 {
   "name": "monotestrunner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "A parallel test runner for monorepos with an interactive terminal UI. Runs tests across multiple packages simultaneously and displays real-time results in a beautiful summary table.",
   "author": "Long-lazuli",
