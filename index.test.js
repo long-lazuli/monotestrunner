@@ -17,6 +17,10 @@ import {
 } from './src/parsers.js';
 import { resolveCommand } from './src/views/command.js';
 import { parseLcovDetailed, getLineCoverageStatus } from './src/coverage.js';
+import { getRunner, detectRunner, getRunnerNames } from './src/runners/index.js';
+import * as vitestRunner from './src/runners/vitest.js';
+import * as bunRunner from './src/runners/bun.js';
+import { parsePnpmWorkspaceYaml, discoverPackages } from './src/packages.js';
 
 // =============================================================================
 // TESTS
@@ -734,8 +738,8 @@ describe('resolveCommand', () => {
 // parseLcovDetailed (with DA: and BRDA: lines)
 // =============================================================================
 
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 
 describe('parseLcovDetailed', () => {
@@ -1034,5 +1038,564 @@ describe('buildCoveragePopoverContent', () => {
     expect(result.header).toHaveLength(3);
     expect(result.body).toHaveLength(1);
     expect(result.selectableBodyIndices).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Runner registry (runners/index.js)
+// =============================================================================
+
+describe('runner registry', () => {
+  describe('detectRunner', () => {
+    it('should detect vitest from test script', () => {
+      expect(detectRunner('vitest run')).toBe('vitest');
+    });
+
+    it('should detect vitest from complex script', () => {
+      expect(detectRunner('cross-env NODE_ENV=test vitest run --coverage')).toBe('vitest');
+    });
+
+    it('should detect bun from test script', () => {
+      expect(detectRunner('bun test')).toBe('bun');
+    });
+
+    it('should detect bun from complex script', () => {
+      expect(detectRunner('bun test --coverage --bail')).toBe('bun');
+    });
+
+    it('should return null for unknown runner', () => {
+      expect(detectRunner('jest')).toBeNull();
+    });
+
+    it('should return null for null input', () => {
+      expect(detectRunner(null)).toBeNull();
+    });
+
+    it('should return null for undefined input', () => {
+      expect(detectRunner(undefined)).toBeNull();
+    });
+
+    it('should return null for empty string', () => {
+      expect(detectRunner('')).toBeNull();
+    });
+  });
+
+  describe('getRunner', () => {
+    it('should return vitest runner by name', () => {
+      const runner = getRunner('vitest');
+      expect(runner).not.toBeNull();
+      expect(runner.name).toBe('vitest');
+    });
+
+    it('should return bun runner by name', () => {
+      const runner = getRunner('bun');
+      expect(runner).not.toBeNull();
+      expect(runner.name).toBe('bun');
+    });
+
+    it('should return null for unknown runner name', () => {
+      expect(getRunner('jest')).toBeNull();
+    });
+
+    it('should return null for null name', () => {
+      expect(getRunner(null)).toBeNull();
+    });
+  });
+
+  describe('getRunnerNames', () => {
+    it('should return array of runner names', () => {
+      const names = getRunnerNames();
+      expect(names).toContain('vitest');
+      expect(names).toContain('bun');
+      expect(names).toHaveLength(2);
+    });
+  });
+});
+
+// =============================================================================
+// Vitest runner adapter (runners/vitest.js)
+// =============================================================================
+
+describe('vitest runner adapter', () => {
+  describe('detect', () => {
+    it('should detect "vitest run"', () => {
+      expect(vitestRunner.detect('vitest run')).toBe(true);
+    });
+
+    it('should detect "vitest" anywhere in script', () => {
+      expect(vitestRunner.detect('cross-env vitest --coverage')).toBe(true);
+    });
+
+    it('should not detect bun', () => {
+      expect(vitestRunner.detect('bun test')).toBe(false);
+    });
+
+    it('should not detect jest', () => {
+      expect(vitestRunner.detect('jest --watchAll')).toBe(false);
+    });
+  });
+
+  describe('buildCommand', () => {
+    it('should return pnpm command with vitest args', () => {
+      const { command, args } = vitestRunner.buildCommand();
+      expect(command).toBe('pnpm');
+      expect(args).toContain('vitest');
+      expect(args).toContain('run');
+      expect(args).toContain('--reporter=dot');
+      expect(args).toContain('--reporter=junit');
+    });
+
+    it('should include --coverage when coverage enabled', () => {
+      const { args } = vitestRunner.buildCommand({ coverage: true });
+      expect(args).toContain('--coverage');
+    });
+
+    it('should not include --coverage by default', () => {
+      const { args } = vitestRunner.buildCommand();
+      expect(args).not.toContain('--coverage');
+    });
+  });
+
+  describe('countDots', () => {
+    it('should count vitest passed dots (·)', () => {
+      expect(vitestRunner.countDots('·····')).toEqual({ passed: 5, skipped: 0, failed: 0 });
+    });
+
+    it('should count vitest skipped dots (-)', () => {
+      expect(vitestRunner.countDots('---')).toEqual({ passed: 0, skipped: 3, failed: 0 });
+    });
+
+    it('should count vitest failed dots (×)', () => {
+      expect(vitestRunner.countDots('×××')).toEqual({ passed: 0, skipped: 0, failed: 3 });
+    });
+
+    it('should count mixed dots', () => {
+      expect(vitestRunner.countDots('····--×·-×')).toEqual({ passed: 5, skipped: 3, failed: 2 });
+    });
+
+    it('should handle empty string', () => {
+      expect(vitestRunner.countDots('')).toEqual({ passed: 0, skipped: 0, failed: 0 });
+    });
+  });
+
+  describe('parseFinal', () => {
+    it('should parse vitest final output (all pass)', () => {
+      const output = `
+ Test Files  3 passed (3)
+      Tests  73 passed (73)
+   Duration  2.07s
+`;
+      const result = vitestRunner.parseFinal(output);
+      expect(result.files).toBe(3);
+      expect(result.tests).toBe(73);
+      expect(result.passed).toBe(73);
+      expect(result.skipped).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(result.duration).toBeCloseTo(2.07, 2);
+    });
+
+    it('should parse vitest final output (mixed)', () => {
+      const output = `
+ Test Files  2 failed | 8 passed (10)
+      Tests  3 failed | 90 passed | 7 skipped (100)
+   Duration  5.0s
+`;
+      const result = vitestRunner.parseFinal(output);
+      expect(result.files).toBe(10);
+      expect(result.tests).toBe(100);
+      expect(result.passed).toBe(90);
+      expect(result.skipped).toBe(7);
+      expect(result.failed).toBe(3);
+    });
+  });
+});
+
+// =============================================================================
+// Bun runner adapter (runners/bun.js)
+// =============================================================================
+
+describe('bun runner adapter', () => {
+  describe('detect', () => {
+    it('should detect "bun test"', () => {
+      expect(bunRunner.detect('bun test')).toBe(true);
+    });
+
+    it('should detect "bun" anywhere in script', () => {
+      expect(bunRunner.detect('cross-env bun test --coverage')).toBe(true);
+    });
+
+    it('should not detect vitest', () => {
+      expect(bunRunner.detect('vitest run')).toBe(false);
+    });
+
+    it('should not detect jest', () => {
+      expect(bunRunner.detect('jest --watchAll')).toBe(false);
+    });
+  });
+
+  describe('buildCommand', () => {
+    it('should return bun command with test args', () => {
+      const { command, args } = bunRunner.buildCommand();
+      expect(command).toBe('bun');
+      expect(args).toContain('test');
+      expect(args).toContain('--dots');
+      expect(args).toContain('--reporter=junit');
+    });
+
+    it('should include coverage flags when coverage enabled', () => {
+      const { args } = bunRunner.buildCommand({ coverage: true });
+      expect(args).toContain('--coverage');
+      expect(args).toContain('--coverage-reporter=lcov');
+      expect(args).toContain('--coverage-dir=coverage');
+    });
+
+    it('should not include coverage flags by default', () => {
+      const { args } = bunRunner.buildCommand();
+      expect(args).not.toContain('--coverage');
+    });
+  });
+
+  describe('countDots', () => {
+    it('should count bun passed dots (.)', () => {
+      expect(bunRunner.countDots('.....')).toEqual({ passed: 5, skipped: 0, failed: 0 });
+    });
+
+    it('should handle empty string', () => {
+      expect(bunRunner.countDots('')).toEqual({ passed: 0, skipped: 0, failed: 0 });
+    });
+
+    it('should always return 0 for skipped and failed', () => {
+      const result = bunRunner.countDots('...........');
+      expect(result.skipped).toBe(0);
+      expect(result.failed).toBe(0);
+    });
+  });
+
+  describe('parseFinal', () => {
+    it('should parse bun final output (all pass)', () => {
+      const output = `
+bun test v1.3.9
+
+ 24 pass
+ 0 fail
+Ran 24 tests across 1 file. [386.00ms]
+`;
+      const result = bunRunner.parseFinal(output);
+      expect(result.files).toBe(1);
+      expect(result.tests).toBe(24);
+      expect(result.passed).toBe(24);
+      expect(result.skipped).toBe(0);
+      expect(result.failed).toBe(0);
+      expect(result.duration).toBeCloseTo(0.386, 3);
+    });
+
+    it('should parse bun final output (mixed)', () => {
+      const output = `
+bun test v1.3.9
+
+ 15 pass
+ 3 skip
+ 2 fail
+Ran 20 tests across 3 files. [750.00ms]
+`;
+      const result = bunRunner.parseFinal(output);
+      expect(result.files).toBe(3);
+      expect(result.tests).toBe(20);
+      expect(result.passed).toBe(15);
+      expect(result.skipped).toBe(3);
+      expect(result.failed).toBe(2);
+    });
+  });
+});
+
+// =============================================================================
+// parsePnpmWorkspaceYaml (packages.js)
+// =============================================================================
+
+describe('parsePnpmWorkspaceYaml', () => {
+  it('should parse standard format with quoted items', () => {
+    const content = `packages:
+  - "packages/*"
+  - "plugins/*"
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'plugins/*']);
+  });
+
+  it('should parse single-quoted items', () => {
+    const content = `packages:
+  - 'packages/*'
+  - 'apps/*'
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'apps/*']);
+  });
+
+  it('should parse unquoted items', () => {
+    const content = `packages:
+  - packages/*
+  - apps/*
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'apps/*']);
+  });
+
+  it('should parse mixed quoted and unquoted items', () => {
+    const content = `packages:
+  - "packages/*"
+  - plugins/*
+  - 'apps/*'
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'plugins/*', 'apps/*']);
+  });
+
+  it('should return empty array for empty packages list', () => {
+    const content = `packages:
+otherKey: value
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual([]);
+  });
+
+  it('should handle comments in the YAML', () => {
+    const content = `# workspace config
+packages:
+  # main packages
+  - packages/*
+  # plugins
+  - plugins/*
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'plugins/*']);
+  });
+
+  it('should stop at next top-level key', () => {
+    const content = `packages:
+  - packages/*
+  - plugins/*
+catalog:
+  react: ^18.0.0
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'plugins/*']);
+  });
+
+  it('should handle explicit paths (no wildcards)', () => {
+    const content = `packages:
+  - packages/*
+  - plugins/vite-plugin-lass/test-app
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual(['packages/*', 'plugins/vite-plugin-lass/test-app']);
+  });
+
+  it('should return empty array for content without packages key', () => {
+    const content = `catalog:
+  react: ^18.0.0
+`;
+    const globs = parsePnpmWorkspaceYaml(content);
+    expect(globs).toEqual([]);
+  });
+
+  it('should return empty array for empty content', () => {
+    expect(parsePnpmWorkspaceYaml('')).toEqual([]);
+  });
+});
+
+// =============================================================================
+// discoverPackages (packages.js)
+// =============================================================================
+
+describe('discoverPackages', () => {
+  let tempDir;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'discover-pkg-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should discover packages from pnpm-workspace.yaml', () => {
+    // Create workspace structure
+    mkdirSync(join(tempDir, 'packages', 'pkg-a'), { recursive: true });
+    mkdirSync(join(tempDir, 'packages', 'pkg-b'), { recursive: true });
+
+    // Write pnpm-workspace.yaml
+    writeFileSync(join(tempDir, 'pnpm-workspace.yaml'), `packages:\n  - packages/*\n`, 'utf-8');
+
+    // Write package.json files
+    writeFileSync(join(tempDir, 'packages', 'pkg-a', 'package.json'), JSON.stringify({
+      name: 'pkg-a',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+    writeFileSync(join(tempDir, 'packages', 'pkg-b', 'package.json'), JSON.stringify({
+      name: 'pkg-b',
+      scripts: { test: 'bun test' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(2);
+
+    const pkgA = packages.find(p => p.name === 'pkg-a');
+    const pkgB = packages.find(p => p.name === 'pkg-b');
+
+    expect(pkgA).toBeDefined();
+    expect(pkgA.testScript).toBe('vitest run');
+    expect(pkgA.runner).toBe('vitest');
+    expect(pkgA.path).toBe(join(tempDir, 'packages', 'pkg-a'));
+
+    expect(pkgB).toBeDefined();
+    expect(pkgB.testScript).toBe('bun test');
+    expect(pkgB.runner).toBe('bun');
+  });
+
+  it('should discover packages from npm workspaces (array format)', () => {
+    mkdirSync(join(tempDir, 'packages', 'my-lib'), { recursive: true });
+
+    // No pnpm-workspace.yaml — use package.json workspaces
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      name: 'my-workspace',
+      workspaces: ['packages/*'],
+    }), 'utf-8');
+
+    writeFileSync(join(tempDir, 'packages', 'my-lib', 'package.json'), JSON.stringify({
+      name: 'my-lib',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe('my-lib');
+    expect(packages[0].runner).toBe('vitest');
+  });
+
+  it('should discover packages from npm workspaces (object format)', () => {
+    mkdirSync(join(tempDir, 'libs', 'core'), { recursive: true });
+
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      name: 'my-workspace',
+      workspaces: { packages: ['libs/*'] },
+    }), 'utf-8');
+
+    writeFileSync(join(tempDir, 'libs', 'core', 'package.json'), JSON.stringify({
+      name: 'core',
+      scripts: { test: 'bun test' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe('core');
+    expect(packages[0].runner).toBe('bun');
+  });
+
+  it('should fallback to rootDir as single package', () => {
+    // No pnpm-workspace.yaml, no workspaces field — just a package.json
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      name: 'standalone-pkg',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe('standalone-pkg');
+    expect(packages[0].path).toBe(tempDir);
+    expect(packages[0].runner).toBe('vitest');
+  });
+
+  it('should set testScript and runner to null for packages without test script', () => {
+    mkdirSync(join(tempDir, 'packages', 'no-tests'), { recursive: true });
+    mkdirSync(join(tempDir, 'packages', 'has-tests'), { recursive: true });
+
+    writeFileSync(join(tempDir, 'pnpm-workspace.yaml'), `packages:\n  - packages/*\n`, 'utf-8');
+
+    writeFileSync(join(tempDir, 'packages', 'no-tests', 'package.json'), JSON.stringify({
+      name: 'no-tests',
+      scripts: { build: 'tsc' },
+    }), 'utf-8');
+    writeFileSync(join(tempDir, 'packages', 'has-tests', 'package.json'), JSON.stringify({
+      name: 'has-tests',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(2);
+
+    const noTests = packages.find(p => p.name === 'no-tests');
+    const hasTests = packages.find(p => p.name === 'has-tests');
+
+    expect(noTests.testScript).toBeNull();
+    expect(noTests.runner).toBeNull();
+    expect(hasTests.testScript).toBe('vitest run');
+    expect(hasTests.runner).toBe('vitest');
+  });
+
+  it('should handle explicit paths in workspace globs', () => {
+    mkdirSync(join(tempDir, 'plugins', 'my-plugin', 'test-app'), { recursive: true });
+
+    writeFileSync(join(tempDir, 'pnpm-workspace.yaml'), `packages:\n  - plugins/my-plugin/test-app\n`, 'utf-8');
+
+    writeFileSync(join(tempDir, 'plugins', 'my-plugin', 'test-app', 'package.json'), JSON.stringify({
+      name: 'test-app',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe('test-app');
+    expect(packages[0].path).toBe(join(tempDir, 'plugins', 'my-plugin', 'test-app'));
+  });
+
+  it('should use directory basename when package.json has no name', () => {
+    writeFileSync(join(tempDir, 'package.json'), JSON.stringify({
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe(basename(tempDir));
+  });
+
+  it('should return empty array for directory with no package.json', () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'empty-discover-'));
+    try {
+      const packages = discoverPackages(emptyDir);
+      expect(packages).toEqual([]);
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should skip directories without package.json in workspace globs', () => {
+    mkdirSync(join(tempDir, 'packages', 'valid-pkg'), { recursive: true });
+    mkdirSync(join(tempDir, 'packages', 'no-pkg-json'), { recursive: true });
+
+    writeFileSync(join(tempDir, 'pnpm-workspace.yaml'), `packages:\n  - packages/*\n`, 'utf-8');
+
+    // Only valid-pkg has a package.json
+    writeFileSync(join(tempDir, 'packages', 'valid-pkg', 'package.json'), JSON.stringify({
+      name: 'valid-pkg',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
+    expect(packages[0].name).toBe('valid-pkg');
+  });
+
+  it('should deduplicate packages discovered from overlapping globs', () => {
+    mkdirSync(join(tempDir, 'packages', 'my-pkg'), { recursive: true });
+
+    writeFileSync(join(tempDir, 'pnpm-workspace.yaml'), `packages:\n  - packages/*\n  - packages/my-pkg\n`, 'utf-8');
+
+    writeFileSync(join(tempDir, 'packages', 'my-pkg', 'package.json'), JSON.stringify({
+      name: 'my-pkg',
+      scripts: { test: 'vitest run' },
+    }), 'utf-8');
+
+    const packages = discoverPackages(tempDir);
+    expect(packages).toHaveLength(1);
   });
 });

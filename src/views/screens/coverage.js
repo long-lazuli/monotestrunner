@@ -23,10 +23,8 @@ import { join, isAbsolute } from 'node:path';
  * Returns header, separator, file rows, separator, and totals.
  *
  * @param {object} pkg - Package { name, path, dir, runner }
- * @param {string} rootDir - Workspace root
- * @returns {{ rows: Array<{ text: string, type: 'header'|'separator'|'file'|'total', fileIndex?: number }>, fileWidth: number }}
  */
-export function buildCoverageRows(pkg, rootDir) {
+export function buildCoverageRows(pkg) {
   const lcovPath = join(pkg.path, 'coverage', 'lcov.info');
   const files = parseLcovDetailed(lcovPath);
   const thresholds = getPackageThresholds(pkg);
@@ -35,7 +33,7 @@ export function buildCoverageRows(pkg, rootDir) {
     return { rows: [], fileWidth: 40 };
   }
 
-  const pkgRoot = join(rootDir, pkg.dir, pkg.name);
+  const pkgRoot = pkg.path;
   const relevantFiles = files.filter((f) => !shouldExcludeFile(f.file));
   // Resolve SF: paths — vitest writes relative paths, bun may write absolute
   const absFiles = relevantFiles.map((f) => isAbsolute(f.file) ? f.file : join(pkgRoot, f.file));
@@ -127,9 +125,8 @@ export function getSelectableFileIndices(rows) {
  * @param {boolean} opts.cursorDimmed - Global cursor dim
  * @param {boolean} opts.coverageEnabled - Coverage enabled for this package
  * @param {number} opts.spinnerIdx - Spinner frame index
- * @param {string} opts.rootDir - Workspace root
  */
-export function renderCoverageScreen({ pkg, state, coverageState, cursorDimmed, coverageEnabled, spinnerIdx, rootDir }) {
+export function renderCoverageScreen({ pkg, state, coverageState, cursorDimmed, coverageEnabled, spinnerIdx }) {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
 
@@ -156,7 +153,7 @@ export function renderCoverageScreen({ pkg, state, coverageState, cursorDimmed, 
       '  Press c to enable coverage and rerun.',
     ]);
   } else {
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const selectableIndices = getSelectableFileIndices(covRows);
 
     if (covRows.length === 0) {

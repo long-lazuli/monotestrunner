@@ -7,6 +7,7 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { getRunner } from './runners/index.js';
 
 // ============================================================================
 // Parsing Functions
@@ -249,22 +250,14 @@ export function parseBunThresholds(configPath) {
 
 /**
  * Get coverage thresholds for a package by reading its config file.
+ * Delegates to the runner adapter's getThresholds().
  * @param {object} pkg - Package object with path and runner properties
  * @returns {object|null} - { lines?, branches?, functions? } or null
  */
 export function getPackageThresholds(pkg) {
-  if (pkg.runner === 'vitest') {
-    // Try vitest.config.ts, then vitest.config.js, then vite.config.ts
-    for (const name of ['vitest.config.ts', 'vitest.config.js', 'vite.config.ts', 'vite.config.js']) {
-      const result = parseVitestThresholds(join(pkg.path, name));
-      if (result) return result;
-    }
-  } else {
-    // Bun: try bunfig.toml
-    const result = parseBunThresholds(join(pkg.path, 'bunfig.toml'));
-    if (result) return result;
-  }
-  return null;
+  const runner = getRunner(pkg.runner);
+  if (!runner) return null;
+  return runner.getThresholds(pkg.path);
 }
 
 // ============================================================================
@@ -318,7 +311,6 @@ export function getVerboseCoverageData(rootDir, packages) {
   const packageData = packages
     .map(pkg => ({
       name: pkg.name,
-      dir: pkg.dir,
       path: pkg.path,
       runner: pkg.runner,
       lcovPath: pkg.lcovPath || join(pkg.path, 'coverage', 'lcov.info'),
@@ -333,7 +325,7 @@ export function getVerboseCoverageData(rootDir, packages) {
     const relevantFiles = pkg.files.filter(f => !shouldExcludeFile(f.file));
     if (relevantFiles.length === 0) continue;
 
-    const pkgRoot = join(rootDir, pkg.dir, pkg.name);
+    const pkgRoot = pkg.path;
     const displayPaths = relevantFiles.map(f => getDisplayPath(f.file, pkgRoot));
     allDisplayPaths.push(...displayPaths);
     const thresholds = getPackageThresholds(pkg);

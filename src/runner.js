@@ -19,13 +19,8 @@ import {
   renderSeparatorWithCoverage,
   renderTotalsWithCoverage,
 } from './ui.js';
-import {
-  parseVitestFinal,
-  parseBunFinal,
-  countVitestDots,
-  countBunDots,
-  parseJunitFile,
-} from './parsers.js';
+import { parseJunitFile } from './parsers.js';
+import { getRunner } from './runners/index.js';
 import { getPackageCoverage, getVerboseCoverageData } from './coverage.js';
 import { join } from 'node:path';
 
@@ -38,22 +33,9 @@ import { join } from 'node:path';
  */
 export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = false) {
   return new Promise((resolve) => {
-    let command, args;
+    const runner = getRunner(pkg.runner);
     const junitPath = join(pkg.path, 'coverage', 'junit.xml');
-
-    if (pkg.runner === 'vitest') {
-      command = 'pnpm';
-      args = ['vitest', 'run', '--reporter=dot', '--reporter=junit', '--outputFile.junit=coverage/junit.xml'];
-      if (coverageEnabled) {
-        args.push('--coverage');
-      }
-    } else {
-      command = 'bun';
-      args = ['test', '--dots', '--reporter=junit', '--reporter-outfile=coverage/junit.xml'];
-      if (coverageEnabled) {
-        args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
-      }
-    }
+    const { command, args } = runner.buildCommand({ coverage: coverageEnabled });
 
     const child = spawn(command, args, {
       cwd: pkg.path,
@@ -61,13 +43,12 @@ export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = fa
     });
 
     let output = '';
-    const countDots = pkg.runner === 'vitest' ? countVitestDots : countBunDots;
 
     const handleData = (data) => {
       const chunk = data.toString();
       output += chunk;
 
-      const counts = countDots(chunk);
+      const counts = runner.countDots(chunk);
       state.passed += counts.passed;
       state.skipped += counts.skipped;
       state.failed += counts.failed;
@@ -81,8 +62,7 @@ export function runTestsWithStreaming(pkg, state, onUpdate, coverageEnabled = fa
     });
 
     child.on('close', (code) => {
-      const parser = pkg.runner === 'vitest' ? parseVitestFinal : parseBunFinal;
-      const final = parser(output);
+      const final = runner.parseFinal(output);
 
       state.status = 'done';
       state.exitCode = code;
@@ -142,7 +122,7 @@ function redrawTable(packages, states, spinnerIdx, nameWidth, lineWidth, totalLi
  */
 export async function runTTY(packages, rootDir, verbose, coverageEnabled = false) {
   // nameWidth includes space for runner suffix: "pkg-name (vitest)"
-  const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
+  const nameWidth = Math.max(20, ...packages.map(p => p.name.length + (p.runner || '').length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
 
   // Inline coverage columns only when coverage is on AND not verbose
@@ -223,13 +203,7 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
 
   // Verbose + coverage: show detailed per-file coverage table after summary
   if (coverageEnabled && verbose) {
-    const pkgsWithPaths = packages.map(pkg => ({
-      name: pkg.name,
-      dir: pkg.dir,
-      path: pkg.path,
-      runner: pkg.runner,
-    }));
-    const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+    const verboseData = getVerboseCoverageData(rootDir, packages);
     if (verboseData.packageDisplayData.length > 0) {
       printVerboseCoverage(verboseData);
     }
@@ -243,7 +217,7 @@ export async function runTTY(packages, rootDir, verbose, coverageEnabled = false
  */
 export async function runCI(packages, rootDir, verbose, coverageEnabled = false) {
   // nameWidth includes space for runner suffix: "pkg-name (vitest)"
-  const nameWidth = Math.max(20, ...packages.map(p => p.name.length + p.runner.length + 3));
+  const nameWidth = Math.max(20, ...packages.map(p => p.name.length + (p.runner || '').length + 3));
   const lineWidth = nameWidth + 2 + 6 * 5 + 10;
 
   const inlineCoverage = coverageEnabled && !verbose;
@@ -299,13 +273,7 @@ export async function runCI(packages, rootDir, verbose, coverageEnabled = false)
 
   // Verbose + coverage: show detailed per-file coverage table after summary
   if (coverageEnabled && verbose) {
-    const pkgsWithPaths = packages.map(pkg => ({
-      name: pkg.name,
-      dir: pkg.dir,
-      path: pkg.path,
-      runner: pkg.runner,
-    }));
-    const verboseData = getVerboseCoverageData(rootDir, pkgsWithPaths);
+    const verboseData = getVerboseCoverageData(rootDir, packages);
     if (verboseData.packageDisplayData.length > 0) {
       printVerboseCoverage(verboseData);
     }

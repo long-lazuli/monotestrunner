@@ -47,7 +47,7 @@ export function createViewState() {
 export function createCoverageFlags(packages, initialValue = false) {
   const flags = {};
   for (const pkg of packages) {
-    flags[pkg.name] = initialValue;
+    flags[pkg.name] = pkg.testScript ? initialValue : false;
   }
   return {
     flags,

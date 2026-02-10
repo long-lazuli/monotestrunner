@@ -143,15 +143,20 @@ The coverage popover shows every source line annotated with execution data:
 
 ```
 index.js                    Entry point (imports src/cli.js)
-index.test.js               Unit tests (vitest)
+index.test.js               Unit tests (vitest, 146 tests)
 src/
-  cli.js                    CLI flags, package discovery, mode dispatch
+  cli.js                    CLI flags, rootDir=cwd, discoverPackages, mode dispatch
   config.js                 Config loading (lilconfig), glob expansion, validation
+  packages.js               Package discovery (pnpm → npm → fallback strategy chain)
   parsers.js                Output parsers (vitest/bun), JUnit XML, extractFailureLine
   coverage.js               Lcov parser (with DA:/BRDA: line data), thresholds, aggregation
   watcher.js                File watcher (chokidar), path mapping
   runner.js                 Non-interactive TTY and CI modes
   ui.js                     Terminal helpers, ANSI utils, formatters
+  runners/
+    index.js                 Registry: getRunner(name), detectRunner(testScript), getRunnerNames()
+    vitest.js                Vitest adapter: detect, buildCommand, countDots, parseFinal, getThresholds
+    bun.js                   Bun adapter: same interface
   views/
     interactive.js           Orchestrator — state, keypress handler, render dispatch,
                              child process management, action handlers
@@ -171,6 +176,9 @@ src/
 ### Key Design Decisions
 
 - **ESM throughout** — `"type": "module"` in package.json
+- **Runner adapter pattern** — Each runner is a file in `src/runners/` exporting a standard interface. Adding a new runner (e.g. jest) means creating one file and adding it to the registry array.
+- **Strategy-based package discovery** — `src/packages.js` runs a chain of strategies (pnpm-workspace.yaml → npm/yarn workspaces → fallback to cwd). First non-null result wins.
+- **No-test package support** — Packages without a `test` script get `testScript: null, runner: null`. They appear as dim rows with "no tests" and are not navigable.
 - **Pure rendering** — Screen modules write to stdout, never mutate state
 - **Single source of truth** — `summary.selectedIndex` tracks the active package across all screens
 - **Alt screen buffer** — Detail screens (tests/coverage) use `\x1b[?1049h/l` to preserve summary
@@ -179,20 +187,44 @@ src/
 
 ## Package Discovery
 
-Scans `packages/`, `plugins/`, and `apps/` directories for `package.json` files with a `test` script. Runner type (vitest/bun) is auto-detected from the script content.
+Packages are discovered automatically via a strategy chain in `src/packages.js`:
 
-## Test Runner Integration
+1. **pnpm** — Parses `pnpm-workspace.yaml` (minimal hand-written YAML parser for the `packages:` list), expands globs via picomatch
+2. **npm/yarn** — Reads `package.json` `workspaces` field (array or `{ packages: [...] }` format)
+3. **Fallback** — Treats the current directory as a single package
 
-Both runners are invoked with dot + JUnit reporters:
+Each discovered package becomes an object:
+
+```js
+{ name, path, testScript, runner }
+// runner is 'vitest' | 'bun' | null (auto-detected from testScript)
+// testScript is null when package has no test script
+```
+
+## Runner Adapters
+
+Each file in `src/runners/` exports a standard interface:
+
+```js
+export const name = 'vitest';
+export function detect(testScript) → boolean
+export function buildCommand({ coverage }) → { command, args }
+export function countDots(chunk) → { passed, skipped, failed }
+export function parseFinal(output) → { files, tests, passed, skipped, failed, duration }
+export function getThresholds(pkgPath) → { lines?, branches?, functions? } | null
+```
+
+To add a new runner (e.g. jest): create `src/runners/jest.js` with the above exports and add it to the `runners` array in `src/runners/index.js`.
+
+Currently supported:
 - **Vitest**: `pnpm vitest run --reporter=dot --reporter=junit --outputFile.junit=coverage/junit.xml`
 - **Bun**: `bun test --dots --reporter=junit --reporter-outfile=coverage/junit.xml`
 
-Coverage flags (`--coverage` for vitest, `--coverage --coverage-reporter=lcov` for bun) are appended when coverage is enabled.
+Coverage flags are appended by each adapter's `buildCommand({ coverage: true })`.
 
 ## Requirements
 
 - Node.js 18+
-- Packages must have a `test` script in `package.json`
 
 ## Dependencies
 

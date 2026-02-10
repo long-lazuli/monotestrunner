@@ -36,7 +36,7 @@ const DUR_SECTION_WIDTH = 10;
  * @param {string} opts.statusMessage - Status bar message
  */
 export function renderSummary({ packages, states, coverageFlags, summaryState, cursorDimmed, spinnerIdx, watchEnabled, statusMessage }) {
-  const nameWidth = Math.max(20, ...packages.map((p) => p.name.length + p.runner.length + 3));
+  const nameWidth = Math.max(20, ...packages.map((p) => p.name.length + (p.runner || '').length + 3));
   const sep = c.dim('│');
 
   process.stdout.write(term.moveTo(1, 1));
@@ -94,12 +94,26 @@ export function renderSummary({ packages, states, coverageFlags, summaryState, c
  * Render a single summary row.
  */
 function renderSummaryRow(pkg, state, spinnerIdx, nameWidth, selected, cursorDimmed, covEnabled) {
-  const paddedName = pkg.name.padEnd(nameWidth - pkg.runner.length - 3);
-  const runnerSuffix = c.gray(`(${pkg.runner})`);
+  const runnerLabel = pkg.runner || '';
+  const paddedName = pkg.name.padEnd(nameWidth - runnerLabel.length - (runnerLabel ? 3 : 0));
+  const runnerSuffix = runnerLabel ? c.gray(`(${runnerLabel})`) : '';
   const marker = selected ? `  ${cursorDimmed ? c.gray('▶') : '▶'}` : '   ';
   const styledName = selected && !cursorDimmed ? paddedName : c.blue(paddedName);
   const name = `${marker} ${styledName} ${runnerSuffix}`;
   const sep = c.dim('│');
+
+  // No test script — dim row with centered message
+  if (state.status === 'no-tests') {
+    const label = 'no tests';
+    // Span across Files+Tests+Pass+Skip+Fail columns (30 chars)
+    const colSpan = 30;
+    const padLeft = Math.floor((colSpan - label.length) / 2);
+    const padRight = colSpan - label.length - padLeft;
+    const left = c.dim(`    ${paddedName} ${runnerSuffix}${' '.repeat(padLeft)}${label}${' '.repeat(padRight)}`);
+    const cov = formatOffCov();
+    const dur = c.dim(formatDuration(null));
+    return `${left} ${sep} ${cov} ${sep} ${dur}`;
+  }
 
   if (state.status === 'pending') {
     const left = c.dim(

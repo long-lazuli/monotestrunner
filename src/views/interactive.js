@@ -17,7 +17,8 @@ import { join, basename, relative } from 'node:path';
 import { term, spinner, createInitialState } from '../ui.js';
 import { getPackageCoverage } from '../coverage.js';
 import { createWatcherManager } from '../watcher.js';
-import { parseVitestFinal, parseBunFinal, countVitestDots, countBunDots, parseJunitFile, extractFailureLine } from '../parsers.js';
+import { parseJunitFile, extractFailureLine } from '../parsers.js';
+import { getRunner } from '../runners/index.js';
 
 import { classifyKey } from './input.js';
 import {
@@ -61,29 +62,19 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
 
     onUpdate('started', pkg.name);
 
-    let command, args;
+    const runner = getRunner(pkg.runner);
     const junitPath = join(pkg.path, 'coverage', 'junit.xml');
-
-    if (pkg.runner === 'vitest') {
-      command = 'pnpm';
-      args = ['vitest', 'run', '--reporter=dot', '--reporter=junit', '--outputFile.junit=coverage/junit.xml'];
-      if (coverageEnabled) args.push('--coverage');
-    } else {
-      command = 'bun';
-      args = ['test', '--dots', '--reporter=junit', '--reporter-outfile=coverage/junit.xml'];
-      if (coverageEnabled) args.push('--coverage', '--coverage-reporter=lcov', '--coverage-dir=coverage');
-    }
+    const { command, args } = runner.buildCommand({ coverage: coverageEnabled });
 
     const child = spawn(command, args, { cwd: pkg.path, stdio: ['ignore', 'pipe', 'pipe'] });
     childProcesses.set(pkg.name, child);
 
     let output = '';
-    const countDots = pkg.runner === 'vitest' ? countVitestDots : countBunDots;
 
     child.stdout.on('data', (data) => {
       const chunk = data.toString();
       output += chunk;
-      const counts = countDots(chunk);
+      const counts = runner.countDots(chunk);
       state.passed += counts.passed;
       state.skipped += counts.skipped;
       state.failed += counts.failed;
@@ -95,8 +86,7 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
     });
 
     child.on('close', (code) => {
-      const parser = pkg.runner === 'vitest' ? parseVitestFinal : parseBunFinal;
-      const final = parser(output);
+      const final = runner.parseFinal(output);
 
       state.status = 'done';
       state.exitCode = code;
@@ -132,15 +122,28 @@ function runPackageTests(pkg, state, onUpdate, childProcesses, pendingReruns, on
  * @param {object} config - Config object with optional watchMappings
  * @param {boolean} initialWatchEnabled - Whether to start with watch enabled
  * @param {boolean} initialCoverageEnabled - Whether to start with coverage enabled
+ * @param {boolean} isSinglePackage - Fallback mode: skip summary, go direct to tests
  */
-export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false) {
+export async function runInteractiveMode(packages, rootDir, config = {}, initialWatchEnabled = false, initialCoverageEnabled = false, isSinglePackage = false) {
+
+  // Filter testable packages for running (keep all for display)
+  const testablePackages = packages.filter((p) => p.testScript !== null);
   // ── State ──
   const states = {};
   for (const pkg of packages) {
-    states[pkg.name] = createInitialState();
+    const s = createInitialState();
+    if (!pkg.testScript) {
+      s.status = 'no-tests';
+    }
+    states[pkg.name] = s;
   }
 
   const viewState = createViewState();
+
+  // Start cursor on the first testable package
+  const firstTestable = packages.findIndex((p) => p.testScript !== null);
+  if (firstTestable > 0) viewState.summary.selectedIndex = firstTestable;
+
   const { flags: coverageFlags, snapshot: coverageSnapshot } = createCoverageFlags(packages, initialCoverageEnabled);
 
   let statusMessage = '';
@@ -194,7 +197,6 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
           cursorDimmed: viewState.cursorDimmed,
           coverageEnabled: coverageFlags[pkg.name],
           spinnerIdx: viewState.spinnerIdx,
-          rootDir,
         });
         break;
       }
@@ -239,7 +241,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       viewState.tests.selectedIndex = 0;
     }
 
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const covSelectable = getSelectableFileIndices(covRows);
     if (covSelectable.length > 0) {
       if (!covSelectable.includes(viewState.coverage.selectedIndex)) {
@@ -261,6 +263,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
   // ── Run helpers ──
 
   const runPkg = (pkg, message) => {
+    if (!pkg.testScript) return; // No test script — nothing to run
     if (states[pkg.name].status === 'running') {
       pendingReruns.add(pkg.name);
       statusMessage = `[${pkg.name}] Queued for rerun...`;
@@ -291,7 +294,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   const runAllNow = () => {
     statusMessage = 'Running all packages...';
-    packages.forEach((pkg) =>
+    testablePackages.forEach((pkg) =>
       runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (p) => {
         onPkgComplete(p);
         checkPendingRunAll();
@@ -300,7 +303,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
   };
 
   const runAll = () => {
-    if (packages.some((pkg) => states[pkg.name].status === 'running')) {
+    if (testablePackages.some((pkg) => states[pkg.name].status === 'running')) {
       pendingRunAll = true;
       statusMessage = 'Queued: rerun all after current tests...';
       render();
@@ -330,6 +333,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   const navigateForward = () => {
     if (viewState.currentScreen === 'summary') {
+      // Don't enter detail for no-test packages
+      const selectedPkg = packages[viewState.summary.selectedIndex];
+      if (!selectedPkg.testScript) return;
       // Enter tests screen for selected package
       viewState.currentScreen = 'tests';
       enterDetailScreen();
@@ -340,7 +346,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       viewState.currentScreen = 'coverage';
       // Initialize cursor to first selectable file
       const pkg = packages[viewState.summary.selectedIndex];
-      const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+      const { rows: covRows } = buildCoverageRows(pkg);
       const selectable = getSelectableFileIndices(covRows);
       if (selectable.length > 0 && !selectable.includes(viewState.coverage.selectedIndex)) {
         viewState.coverage.selectedIndex = selectable[0];
@@ -379,7 +385,11 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
    * @param {number} direction - +1 for next, -1 for previous
    */
   const switchPackage = (direction) => {
-    const newIdx = viewState.summary.selectedIndex + direction;
+    let newIdx = viewState.summary.selectedIndex + direction;
+    // Skip no-test packages
+    while (newIdx >= 0 && newIdx < packages.length && !packages[newIdx].testScript) {
+      newIdx += direction;
+    }
     if (newIdx < 0 || newIdx >= packages.length) return;
     viewState.summary.selectedIndex = newIdx;
     // Close popovers if open
@@ -395,7 +405,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     enterDetailScreen();
     // Also reset coverage cursor for the new package
     const pkg = packages[newIdx];
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const covSelectable = getSelectableFileIndices(covRows);
     viewState.coverage.selectedIndex = covSelectable.length > 0 ? covSelectable[0] : 0;
     viewState.coverage.scrollOffset = 0;
@@ -424,7 +434,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   const moveCoverageCursor = (direction) => {
     const pkg = packages[viewState.summary.selectedIndex];
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const selectable = getSelectableFileIndices(covRows);
     if (selectable.length === 0) return;
 
@@ -552,7 +562,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     if (!actionCommand) return;
 
     const pkg = getSelectedPkg();
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const selectableIndices = getSelectableFileIndices(covRows);
     const cursorRow = viewState.coverage.selectedIndex;
     if (!selectableIndices.includes(cursorRow)) return;
@@ -583,7 +593,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
    */
   const getCoveragePopoverSelectable = () => {
     const pkg = getSelectedPkg();
-    const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+    const { rows: covRows } = buildCoverageRows(pkg);
     const cursorRow = viewState.coverage.selectedIndex;
     const row = covRows[cursorRow];
     if (!row || row.type !== 'file') return { row: null, selectableBodyIndices: [] };
@@ -806,13 +816,18 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     // Vertical navigation
     if (evt.type === 'vertical') {
       switch (viewState.currentScreen) {
-        case 'summary':
-          viewState.summary.selectedIndex = Math.max(
-            0,
-            Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction),
-          );
+        case 'summary': {
+          // Skip no-test packages
+          let idx = viewState.summary.selectedIndex + evt.direction;
+          while (idx >= 0 && idx < packages.length && !packages[idx].testScript) {
+            idx += evt.direction;
+          }
+          if (idx >= 0 && idx < packages.length) {
+            viewState.summary.selectedIndex = idx;
+          }
           render();
           break;
+        }
 
         case 'tests':
           moveTestsCursor(evt.direction);
@@ -831,10 +846,14 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     if (evt.type === 'vertical-page') {
       if (viewState.currentScreen === 'summary') {
         const halfPage = Math.floor(packages.length / 2) || 1;
-        viewState.summary.selectedIndex = Math.max(
-          0,
-          Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction * halfPage),
-        );
+        let idx = Math.max(0, Math.min(packages.length - 1, viewState.summary.selectedIndex + evt.direction * halfPage));
+        // Snap to nearest testable package
+        while (idx >= 0 && idx < packages.length && !packages[idx].testScript) {
+          idx += evt.direction;
+        }
+        if (idx >= 0 && idx < packages.length) {
+          viewState.summary.selectedIndex = idx;
+        }
         render();
       } else {
         // tests or coverage — switch package
@@ -860,7 +879,7 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
       } else if (viewState.currentScreen === 'coverage') {
         // Open coverage popover for selected file
         const pkg = packages[viewState.summary.selectedIndex];
-        const { rows: covRows } = buildCoverageRows(pkg, rootDir);
+        const { rows: covRows } = buildCoverageRows(pkg);
         const selectable = getSelectableFileIndices(covRows);
         if (selectable.includes(viewState.coverage.selectedIndex)) {
           viewState.coverage.popoverVisible = true;
@@ -934,6 +953,12 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
 
   process.stdout.write(term.hideCursor + term.clearScreen);
 
+  // Fallback: single package → skip summary, go directly to tests
+  if (isSinglePackage && testablePackages.length > 0) {
+    viewState.currentScreen = 'tests';
+    process.stdout.write(ALT_SCREEN_ON);
+  }
+
   // Initial render
   render();
   dimTimer.reset();
@@ -952,9 +977,9 @@ export async function runInteractiveMode(packages, rootDir, config = {}, initial
     }
   }, spinner.interval);
 
-  // Run all tests initially
+  // Run all tests initially (only packages that have test scripts)
   statusMessage = 'Running all packages...';
-  const initialPromises = packages.map((pkg) =>
+  const initialPromises = testablePackages.map((pkg) =>
     runPackageTests(pkg, states[pkg.name], onUpdate, childProcesses, pendingReruns, (p) => {
       onPkgComplete(p);
       checkPendingRunAll();

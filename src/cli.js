@@ -6,12 +6,10 @@
  * interactive, TTY, or CI.
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import meow from 'meow';
 
 import { loadConfig, validateConfig } from './config.js';
+import { discoverPackages } from './packages.js';
 import { runInteractiveMode } from './views/interactive.js';
 import { runTTY, runCI } from './runner.js';
 
@@ -52,8 +50,7 @@ const cli = meow(`
   },
 });
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const rootDir = join(__dirname, '../../..');
+const rootDir = process.cwd();
 const verbose = cli.flags.verbose;
 const coverage = cli.flags.coverage;
 const watchInitial = cli.flags.watch;
@@ -61,52 +58,15 @@ const interactive = cli.flags.interactive || watchInitial; // -w implies -i
 const isCI = process.env.CI === 'true';
 const isInteractiveTTY = process.stdout.isTTY && !isCI;
 
-/**
- * Find all packages with test scripts
- */
-function findPackages() {
-  const packages = [];
-  const dirs = ['packages', 'plugins', 'apps'];
-
-  for (const dir of dirs) {
-    const dirPath = join(rootDir, dir);
-    if (!existsSync(dirPath)) continue;
-
-    for (const name of readdirSync(dirPath)) {
-      const pkgPath = join(dirPath, name);
-      const pkgJsonPath = join(pkgPath, 'package.json');
-
-      if (!existsSync(pkgJsonPath)) continue;
-
-      try {
-        const pkgJson = JSON.parse(readFileSync(pkgJsonPath, 'utf-8'));
-        if (pkgJson.scripts?.test) {
-          packages.push({
-            name,
-            dir,
-            path: pkgPath,
-            testScript: pkgJson.scripts.test,
-            runner: pkgJson.scripts.test.includes('vitest') ? 'vitest' : 'bun',
-          });
-        }
-      } catch {
-        // Skip invalid package.json
-      }
-    }
-  }
-
-  return packages;
-}
-
 // ============================================================================
 // Entry Point
 // ============================================================================
 
 async function main() {
-  const packages = findPackages();
+  const packages = discoverPackages(rootDir);
 
   if (packages.length === 0) {
-    console.log('No packages with tests found.');
+    console.log('No packages found.');
     process.exit(0);
   }
 
@@ -116,13 +76,22 @@ async function main() {
     validateConfig(config, packages, rootDir);
   }
 
+  // Fallback mode: single package with no workspace config → skip summary
+  const isSinglePackage = packages.length === 1 && packages[0].path === rootDir;
+  // Packages that actually have tests (for non-interactive modes)
+  const testablePackages = packages.filter((p) => p.testScript !== null);
+
   if (interactive) {
-    await runInteractiveMode(packages, rootDir, config, watchInitial, coverage);
+    await runInteractiveMode(packages, rootDir, config, watchInitial, coverage, isSinglePackage);
     // Interactive mode doesn't exit normally
   } else {
+    if (testablePackages.length === 0) {
+      console.log('No packages with tests found.');
+      process.exit(0);
+    }
     const exitCode = isInteractiveTTY
-      ? await runTTY(packages, rootDir, verbose, coverage)
-      : await runCI(packages, rootDir, verbose, coverage);
+      ? await runTTY(testablePackages, rootDir, verbose, coverage)
+      : await runCI(testablePackages, rootDir, verbose, coverage);
     // Only exit with error code in CI to avoid pnpm ELIFECYCLE noise locally
     process.exit(isCI ? exitCode : 0);
   }
